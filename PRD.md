@@ -8,7 +8,7 @@
 
 TabGraph is a Chromium browser extension that automatically organizes tabs into semantic groups using AI-powered clustering, builds a personal temporal knowledge graph of browsing behavior, and proactively recommends related content using You.com's APIs. It combines Chrome's native Tab Groups API with knowledge graph technology to solve tab overload for researchers, learners, and knowledge workers.
 
-**Tech Stack:** Python (FastAPI) + Chromium Extension + You.com APIs + OpenAI + SQLite/Neo4j
+**Tech Stack:** Python (FastAPI) + Chromium Extension + You.com APIs + OpenAI + SQLite
 
 ---
 
@@ -33,10 +33,14 @@ TabGraph is a Chromium browser extension that automatically organizes tabs into 
 
 TabGraph combines three core technologies:
 1. **Chrome Tab Groups API** - Native browser tab organization
-2. **Temporal Knowledge Graph** - Track entities, relationships, and evolution over time
+2. **SQLite Knowledge Graph** - Fast, lightweight storage for active tab sessions
 3. **You.com APIs** - Real-time web search, news, and AI-powered content analysis
 
-**Key Innovation:** Unlike traditional tab managers, TabGraph understands the *semantic relationships* between tabs and builds a personal knowledge graph that grows with the user's research.
+**Key Innovation:** Unlike traditional tab managers, TabGraph understands the *semantic relationships* between tabs and builds a personal knowledge graph focused on your current research session.
+
+**Data Architecture:**
+- **SQLite (Current):** Stores active tabs and current session entities for fast clustering
+- **Neo4j (Future):** Optional upgrade for historical archive (past 5 days) and advanced temporal queries
 
 ---
 
@@ -196,7 +200,9 @@ TabGraph combines three core technologies:
 
 ---
 
-### 6. Temporal Knowledge Graph
+### 6. Current Session Knowledge Graph
+
+**Storage:** SQLite database (lightweight, fast, session-focused)
 
 **Data Model:**
 
@@ -219,27 +225,19 @@ TabGraph combines three core technologies:
 - Entities discovered
 - Relationships formed
 
-**Temporal Tracking:**
+**Current Session Tracking:**
 
-**Knowledge Graph Growth:**
-- New entities discovered per session
+**Knowledge Graph Growth (Current Session):**
+- New entities discovered in active session
 - New relationships formed
-- Graph size over time (entities + relationships)
-
-**Topic Evolution:**
-- Track dominant topics per day/week
-- Show research focus shifts (e.g., "Python basics" → "FastAPI" → "Async programming")
-- Visualize topic timeline
+- Graph size (entities + relationships) for current tabs
 
 **Fresh Content Alerts:**
-- Daily check: Query You.com News API for entities in graph
-- Alert user to breaking news on their research topics
+- Check You.com News API for entities in current session
+- Alert user to breaking news on their active research topics
 - Badge notification with count
 
-**Temporal Queries (Advanced):**
-- "What was I researching last week?"
-- "When did I first learn about Neo4j?"
-- "Show how my understanding of knowledge graphs evolved"
+**Note:** Advanced temporal queries across historical sessions (past days/weeks) will be available with the Neo4j upgrade (see Future Enhancements).
 
 ---
 
@@ -378,10 +376,10 @@ TabGraph combines three core technologies:
 │  │  • Temporal Tracker                       │  │
 │  └───────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────┐  │
-│  │  Knowledge Graph (SQLite/Neo4j)           │  │
-│  │  • Entities                               │  │
-│  │  • Triplets (relationships)               │  │
-│  │  • Sessions                               │  │
+│  │  Knowledge Graph (SQLite)                 │  │
+│  │  • Current session entities               │  │
+│  │  • Active tab relationships               │  │
+│  │  • Fast, lightweight storage              │  │
 │  └───────────────────────────────────────────┘  │
 └──────────────────┬──────────────────────────────┘
                    │ API Calls
@@ -958,13 +956,12 @@ cy.on('tap', 'node[type="cluster"]', async (event) => {
 
 ### Phase 3: Full Feature Set - Polish & Advanced Features
 
-**Goal:** Context menus, temporal insights, news alerts
+**Goal:** Context menus, current session insights, news alerts
 
 **Backend:**
 - GET /api/insights endpoint
 - You.com News API integration
-- Temporal tracking (topic evolution)
-- Neo4j support (optional, for advanced temporal queries)
+- Current session tracking (entity growth, topic focus)
 
 **Extension:**
 - Context menus (right-click node/cluster)
@@ -1007,12 +1004,6 @@ OPENAI_LLM_MODEL=gpt-4o-mini
 
 # Database Configuration
 DB_PATH=./data/knowledge_graph.db
-
-# Neo4j Configuration (optional)
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=your_neo4j_password_here
-NEO4J_DATABASE=neo4j
 
 # FastAPI Server Configuration
 SERVER_HOST=localhost
@@ -1105,29 +1096,67 @@ uv run python examples/start_server.py
 
 ## Future Enhancements
 
-### v1.1: Collaboration
+### v1.1: Neo4j Historical Archive (Post-MVP Priority)
+
+**Goal:** Upgrade from session-only SQLite to historical knowledge graph with advanced temporal queries
+
+**Features:**
+- **Historical Archive:** Past 5 days of browsing sessions (configurable retention)
+- **Hybrid Storage Architecture:**
+  - SQLite: Current active tabs (50-100 tabs, real-time clustering)
+  - Neo4j: Historical sessions synced nightly or on browser close
+- **Advanced Temporal Queries:**
+  - "What was I researching last Tuesday?"
+  - "When did I first learn about Neo4j?"
+  - "Show how my understanding evolved from React to Next.js"
+  - Timeline visualization of research evolution
+- **Topic Evolution Tracking:**
+  - Track dominant topics per day/week
+  - Visualize research focus shifts over time
+  - Identify learning patterns
+- **Automatic Data Sync:**
+  - Periodic sync from SQLite to Neo4j (nightly or configurable)
+  - Auto-purge data older than retention period (default: 5 days)
+  - Optional: Export historical graph before purge
+
+**Implementation:**
+- Neo4j server setup (Docker or local)
+- Sync agent for SQLite → Neo4j data transfer
+- New API endpoints for temporal queries
+- Enhanced insights panel with timeline view
+- Settings: Configure retention period, sync frequency
+
+**Benefits:**
+- Keep SQLite fast for real-time tab management
+- Get historical insights without performance impact
+- Optional upgrade (users who don't need history stay on SQLite)
+- Privacy-friendly with configurable auto-purge
+
+---
+
+### v1.2: Collaboration
 - Share knowledge graphs with team members
 - Collaborative tab collections
 - Team recommendations
 
-### v1.2: Advanced Analytics
+### v1.3: Advanced Analytics
 - Research session reports (PDF export)
 - Time spent per topic
 - Reading completion tracking
 - Citation graph (who links to whom)
 
-### v1.3: Mobile Support
+### v1.4: Mobile Support
 - Sync knowledge graph to mobile
 - Mobile app for viewing graph
 - Cross-device tab continuity
 
-### v1.4: AI Agents
+### v1.5: AI Agents
 - Custom You.com agents for specific domains
 - Automated research briefs
 - "Explain this topic to me" agent
 - Literature review agent
 
-### v1.5: Integrations
+### v1.6: Integrations
 - Notion export
 - Zotero integration
 - Obsidian sync

@@ -41,10 +41,11 @@ TabGraph is a Chromium browser extension that solves tab overload for researcher
 - You.com News API: Breaking news on your research topics
 - **One-click:** Open recommendations directly in relevant tab groups
 
-### ⏱️ Temporal Tracking
-- Track knowledge graph growth over time
-- See how your research focus evolves (e.g., "React" → "Next.js")
-- Alerts for breaking news on entities in your graph
+### ⏱️ Current Session Tracking
+- Track knowledge graph growth in current session
+- See entity discovery as you research
+- Alerts for breaking news on entities in your active tabs
+- **Future:** Historical archive with Neo4j (past 5 days, advanced temporal queries)
 
 ---
 
@@ -52,9 +53,10 @@ TabGraph is a Chromium browser extension that solves tab overload for researcher
 
 **Backend:**
 - FastAPI (Python)
-- SQLite or Neo4j (temporal knowledge graph)
+- SQLite (current session knowledge graph)
 - You.com APIs (Express, Search, News)
 - OpenAI GPT-4o-mini (entity structuring)
+- Neo4j (future: historical archive with 5-day retention)
 
 **Extension:**
 - Chromium Manifest V3
@@ -72,7 +74,7 @@ kg-graph-search/
 │   └── kg_graph_search/
 │       ├── server/              # FastAPI backend
 │       ├── agents/              # Tab analyzer, clusterer, recommender
-│       ├── graph/               # Knowledge graph (SQLite/Neo4j)
+│       ├── graph/               # Knowledge graph (SQLite)
 │       │   ├── base.py          # Abstract interface
 │       │   ├── models.py        # Pydantic models
 │       │   ├── database.py      # SQLite implementation
@@ -112,8 +114,8 @@ cd kgGraphwithSearch
 # Install dependencies
 uv sync
 
-# Optional: Install Neo4j support
-uv sync --extra neo4j
+# Optional: Install Neo4j support (for future historical archive feature)
+# uv sync --extra neo4j
 
 # Configure environment
 cp .env.example .env
@@ -222,9 +224,9 @@ DB_PATH=./data/knowledge_graph.db
 SERVER_PORT=8000
 TAB_MONITOR_INTERVAL_MINUTES=5
 
-# Neo4j (optional)
-NEO4J_URI=bolt://localhost:7687
-NEO4J_PASSWORD=your_password
+# Neo4j (future feature - historical archive)
+# NEO4J_URI=bolt://localhost:7687
+# NEO4J_PASSWORD=your_password
 ```
 
 ---
@@ -245,7 +247,7 @@ NEO4J_PASSWORD=your_password
 │  • Tab analyzer                  │
 │  • Clustering engine             │
 │  • Recommendation engine         │
-│  • Knowledge graph (SQLite/Neo4j)│
+│  • SQLite (current session)     │
 └──────────┬───────────────────────┘
            │ API Calls
            ▼
