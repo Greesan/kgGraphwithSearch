@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:cookbook.openai.com)",
+      "Bash(uv --version:*)",
+      "Bash(uv init:*)",
+      "Bash(uv sync:*)",
+      "WebSearch",
+      "WebFetch(domain:milvus.io)",
+      "WebFetch(domain:documentation.you.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

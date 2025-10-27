@@ -1,0 +1,52 @@
+[project]
+name = "kg-graph-search"
+version = "0.1.0"
+description = "Temporal agents with knowledge graphs and You.com search integration"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # OpenAI and LLM
+    "openai>=1.0.0",
+
+    # Data validation and processing
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "jinja2>=3.1.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+
+    # Knowledge graph and text processing
+    "chonkie>=0.1.0",
+    "rapidfuzz>=3.0.0",
+    "networkx>=3.0",
+
+    # Visualization
+    "plotly>=5.0.0",
+
+    # Utilities
+    "tenacity>=8.0.0",
+    "tiktoken>=0.5.0",
+    "datasets>=2.0.0",
+    "tqdm>=4.65.0",
+
+    # API and HTTP
+    "httpx>=0.27.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+
+    # Jupyter support (optional)
+    "ipykernel>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+neo4j = [
+    "neo4j>=5.14.0",
+]
