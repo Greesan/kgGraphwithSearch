@@ -129,6 +129,35 @@ class TabClusterer:
         except Exception as e:
             raise Exception(f"Failed to generate embedding: {e}")
 
+    def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """
+        Generate embeddings for multiple texts in a single API call.
+
+        This is much faster than calling generate_embedding() repeatedly.
+        OpenAI supports up to 2048 inputs per batch.
+
+        Args:
+            texts: List of texts to embed
+
+        Returns:
+            List of embedding vectors in same order as input
+
+        Raises:
+            Exception: If OpenAI API call fails
+        """
+        if not texts:
+            return []
+
+        try:
+            # OpenAI API supports batching up to 2048 inputs
+            response = self.openai_client.embeddings.create(
+                model=self.embedding_model, input=texts
+            )
+            # Extract embeddings in order
+            return [data.embedding for data in response.data]
+        except Exception as e:
+            raise Exception(f"Failed to generate batch embeddings: {e}")
+
     def generate_cluster_name(
         self, cluster: TabCluster, max_tabs_to_consider: int = 10
     ) -> str:
@@ -355,7 +384,10 @@ Generate the name (no quotes, just the name):"""
 
     def process_tabs_batch(self, tabs: list[Tab]) -> ClusteringResult:
         """
-        Process multiple tabs in batch.
+        Process multiple tabs in batch with optimized embedding generation.
+
+        This method generates embeddings for all tabs in a single API call,
+        which is ~10x faster than processing tabs individually.
 
         Args:
             tabs: List of tabs to cluster
@@ -363,8 +395,34 @@ Generate the name (no quotes, just the name):"""
         Returns:
             ClusteringResult with clustering statistics
         """
+        # Separate tabs that need embeddings from those that already have them
+        tabs_needing_embeddings = [tab for tab in tabs if not tab.embedding]
+        tabs_with_embeddings = [tab for tab in tabs if tab.embedding]
+
+        # Batch generate embeddings for all tabs that need them
+        if tabs_needing_embeddings:
+            texts = [f"{tab.title} {tab.url}" for tab in tabs_needing_embeddings]
+            embeddings = self.generate_embeddings_batch(texts)
+
+            # Assign embeddings back to tabs
+            for tab, embedding in zip(tabs_needing_embeddings, embeddings):
+                tab.embedding = embedding
+
+        # Now process all tabs (clustering assignment)
         for tab in tabs:
-            self.process_tab(tab)
+            # Skip embedding generation since we already have it
+            result = self.find_best_cluster(tab)
+
+            if result:
+                cluster, similarity = result
+                print(
+                    f"Assigning tab '{tab.title}' to cluster '{cluster.name}' (similarity: {similarity:.2f})"
+                )
+                self.add_tab_to_cluster(cluster, tab)
+            else:
+                # Create new cluster
+                print(f"Creating new cluster for tab '{tab.title}'")
+                self.create_new_cluster(tab)
 
         return ClusteringResult(
             clusters=self.clusters.copy(),

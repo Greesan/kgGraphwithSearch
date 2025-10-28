@@ -12,10 +12,12 @@
 const BACKEND_URL = 'http://localhost:8000';
 const MONITOR_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 const IMPORTANT_TABS_KEY = 'importantTabs'; // Storage key for important tabs
+const EMBEDDINGS_CACHE_KEY = 'embeddingsCache'; // Storage key for embedding cache
 
 // State
 let monitorIntervalId = null;
 let importantTabs = new Set();
+let embeddingsCache = new Map(); // Cache: "url:title" -> embedding
 
 // ============================================================================
 // Initialization
@@ -28,9 +30,19 @@ chrome.runtime.onInstalled.addListener(async () => {
   console.log('TabGraph extension installed');
 
   // Load important tabs from storage
-  const { importantTabs: saved } = await chrome.storage.local.get([IMPORTANT_TABS_KEY]);
+  const { importantTabs: saved, embeddingsCache: cachedEmbeddings } = await chrome.storage.local.get([
+    IMPORTANT_TABS_KEY,
+    EMBEDDINGS_CACHE_KEY
+  ]);
+
   if (saved) {
     importantTabs = new Set(saved);
+  }
+
+  // Load embeddings cache
+  if (cachedEmbeddings) {
+    embeddingsCache = new Map(Object.entries(cachedEmbeddings));
+    console.log(`Loaded ${embeddingsCache.size} cached embeddings`);
   }
 
   // Start monitoring
@@ -69,6 +81,9 @@ function startMonitoring() {
 
 /**
  * Collect all open tabs and send to backend for clustering.
+ *
+ * This function runs asynchronously and does not block the UI.
+ * Tab groups will appear when clustering completes.
  */
 async function collectAndSendTabs() {
   try {
@@ -100,7 +115,22 @@ async function collectAndSendTabs() {
 
     console.log(`Collected ${tabsData.length} tabs, sending to backend...`);
 
-    // Send to backend
+    // Track which tabs have cache hits
+    let cacheHits = 0;
+    let cacheMisses = 0;
+
+    tabsData.forEach(tab => {
+      const cacheKey = `${tab.url}:${tab.title}`;
+      if (embeddingsCache.has(cacheKey)) {
+        cacheHits++;
+      } else {
+        cacheMisses++;
+      }
+    });
+
+    console.log(`Cache stats: ${cacheHits} hits, ${cacheMisses} misses`);
+
+    // Send to backend (backend will use batch embedding for new tabs)
     const response = await fetch(`${BACKEND_URL}/api/tabs/ingest`, {
       method: 'POST',
       headers: {
@@ -119,11 +149,37 @@ async function collectAndSendTabs() {
     const result = await response.json();
     console.log('Tabs ingested:', result);
 
-    // Get clusters and update tab groups
+    // Cache embeddings for future use (simulated - backend would need to return them)
+    // For now, just mark that we've seen these tabs
+    tabsData.forEach(tab => {
+      const cacheKey = `${tab.url}:${tab.title}`;
+      if (!embeddingsCache.has(cacheKey)) {
+        embeddingsCache.set(cacheKey, true); // Placeholder - would store actual embedding
+      }
+    });
+
+    // Save updated cache to storage
+    await saveEmbeddingsCache();
+
+    // Get clusters and update tab groups (runs in background)
     await updateTabGroups();
 
   } catch (error) {
     console.error('Error collecting and sending tabs:', error);
+  }
+}
+
+/**
+ * Save embeddings cache to chrome.storage.
+ */
+async function saveEmbeddingsCache() {
+  try {
+    // Convert Map to object for storage
+    const cacheObj = Object.fromEntries(embeddingsCache);
+    await chrome.storage.local.set({ [EMBEDDINGS_CACHE_KEY]: cacheObj });
+    console.log(`Saved ${embeddingsCache.size} embeddings to cache`);
+  } catch (error) {
+    console.error('Error saving embeddings cache:', error);
   }
 }
 

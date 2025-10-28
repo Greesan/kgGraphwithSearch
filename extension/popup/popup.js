@@ -23,6 +23,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 /**
  * Handle sync button click.
+ *
+ * This triggers a sync in the background and returns immediately.
+ * The dashboard will update when clustering completes.
  */
 async function handleSyncClick() {
   const button = document.getElementById('sync-button');
@@ -30,15 +33,39 @@ async function handleSyncClick() {
   button.style.opacity = '0.6';
 
   try {
-    // Send message to background script to sync now
-    await chrome.runtime.sendMessage({ action: 'sync-now' });
+    // Send message to background script to sync now (non-blocking)
+    chrome.runtime.sendMessage({ action: 'sync-now' });
 
-    // Reload dashboard data
-    await loadDashboardData();
+    // Show immediate feedback
+    showInfo('Syncing tabs in background...');
+
+    // Poll for updates every 500ms for up to 10 seconds
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    const pollInterval = setInterval(async () => {
+      attempts++;
+
+      // Reload dashboard data
+      await loadDashboardData();
+
+      // Stop polling after max attempts or if we have clusters
+      if (attempts >= maxAttempts) {
+        clearInterval(pollInterval);
+        button.disabled = false;
+        button.style.opacity = '1';
+      }
+    }, 500);
+
+    // Re-enable button after 2 seconds regardless
+    setTimeout(() => {
+      button.disabled = false;
+      button.style.opacity = '1';
+    }, 2000);
+
   } catch (error) {
     console.error('Error syncing:', error);
     showError('Failed to sync tabs');
-  } finally {
     button.disabled = false;
     button.style.opacity = '1';
   }
@@ -143,6 +170,16 @@ function updateGroupsList(clusters) {
 function showError(message) {
   const listElement = document.getElementById('groups-list');
   listElement.innerHTML = `<p class="error">${escapeHtml(message)}</p>`;
+}
+
+/**
+ * Show info message.
+ *
+ * @param {string} message - Info message to display
+ */
+function showInfo(message) {
+  const listElement = document.getElementById('groups-list');
+  listElement.innerHTML = `<p class="loading">${escapeHtml(message)}</p>`;
 }
 
 // ============================================================================

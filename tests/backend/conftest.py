@@ -41,10 +41,18 @@ def mock_openai():
     with patch("kg_graph_search.agents.tab_clusterer.OpenAI") as mock:
         mock_client = Mock()
 
-        # Mock embedding response (1536-dim vector)
-        mock_embedding = Mock()
-        mock_embedding.data = [Mock(embedding=[0.1] * 1536)]
-        mock_client.embeddings.create.return_value = mock_embedding
+        def mock_embeddings_create(model, input):
+            """Mock embeddings.create that handles both single and batch inputs."""
+            mock_response = Mock()
+            if isinstance(input, list):
+                # Batch mode: return multiple embeddings
+                mock_response.data = [Mock(embedding=[0.1] * 1536) for _ in input]
+            else:
+                # Single mode: return one embedding
+                mock_response.data = [Mock(embedding=[0.1] * 1536)]
+            return mock_response
+
+        mock_client.embeddings.create.side_effect = mock_embeddings_create
 
         # Mock chat completion response
         mock_completion = Mock()
