@@ -9,7 +9,7 @@
  */
 
 // Import configuration
-importScripts('config.js');
+import { CONFIG } from './config.js';
 
 // Configuration
 const BACKEND_URL = CONFIG.BACKEND_URL;

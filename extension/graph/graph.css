@@ -270,20 +270,23 @@ header h1 {
 
 .legend-icon.cluster {
   background: #667eea;
-  width: 32px;
-  height: 32px;
-  border: 2px solid #fff;
+  width: 35px;
+  height: 35px;
+  border: 3px solid #fff;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .legend-icon.tab {
   background: #4A90E2;
+  width: 22px;
+  height: 22px;
+  border: 2px solid #fff;
 }
 
 .legend-icon.entity {
   background: #9C27B0;
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
 }
 
 /* ============================================================================

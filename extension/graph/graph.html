@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <title>TabGraph - Knowledge Graph Visualization</title>
   <link rel="stylesheet" href="graph.css">
-  <!-- Cytoscape.js for graph visualization -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+  <!-- Cytoscape.js for graph visualization (local copy to comply with CSP) -->
+  <script src="cytoscape.min.js"></script>
 </head>
 <body>
   <div class="container">
@@ -13,6 +13,9 @@
     <header>
       <h1>📊 Knowledge Graph</h1>
       <div class="controls">
+        <button id="toggle-view-button" title="Toggle between Cluster and Entity views">
+          <span>🔄</span> <span id="view-label">Entity View</span>
+        </button>
         <button id="refresh-button" title="Refresh Graph">
           <span>🔄</span> Refresh
         </button>
@@ -92,7 +95,6 @@
     </div>
   </div>
 
-  <script src="../config.js"></script>
-  <script src="graph.js"></script>
+  <script type="module" src="graph.js"></script>
 </body>
 </html>

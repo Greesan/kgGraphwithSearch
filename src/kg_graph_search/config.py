@@ -2,6 +2,7 @@
 Configuration management for the application.
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -48,3 +49,30 @@ def get_settings() -> Settings:
     if settings is None:
         settings = Settings()
     return settings
+
+
+def setup_logging(log_level: str = "INFO") -> None:
+    """
+    Configure application-wide logging.
+
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+    """
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+
+def get_logger(name: str) -> logging.Logger:
+    """
+    Get a logger instance for a module.
+
+    Args:
+        name: Logger name (typically __name__)
+
+    Returns:
+        Configured logger instance
+    """
+    return logging.getLogger(name)

@@ -26,6 +26,7 @@ class Tab(BaseModel):
         last_accessed: When the tab was last accessed
         window_id: Browser window ID containing this tab
         group_id: Chrome Tab Group ID (if assigned)
+        important: Whether the tab is marked as important by the user
     """
 
     id: int
@@ -38,6 +39,7 @@ class Tab(BaseModel):
     last_accessed: datetime = Field(default_factory=lambda: datetime.now(UTC))
     window_id: Optional[int] = None
     group_id: Optional[int] = None
+    important: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

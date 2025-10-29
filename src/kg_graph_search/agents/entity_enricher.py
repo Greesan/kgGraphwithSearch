@@ -2,12 +2,16 @@
 Entity enrichment service using You.com API.
 
 Enriches entities with descriptions, types, and related concepts from web sources.
-Implements caching to minimize API costs.
+Uses You.com search API for reliable, individual entity enrichment.
 """
 
 from datetime import datetime, timedelta, UTC
 from typing import Optional
+
+from kg_graph_search.config import get_logger
 from kg_graph_search.search.you_client import YouAPIClient
+
+logger = get_logger(__name__)
 
 
 class EntityEnricher:
@@ -26,7 +30,10 @@ class EntityEnricher:
 
     def enrich_entity(self, entity_name: str) -> dict:
         """
-        Enrich an entity with web information.
+        Enrich an entity using You.com Express Agent.
+
+        Domain-agnostic approach works for entities from any field
+        (technology, medicine, history, business, etc.)
 
         Args:
             entity_name: Name of the entity to enrich
@@ -36,48 +43,92 @@ class EntityEnricher:
             {
                 "name": str,
                 "description": str,
-                "type": str,  # "Technology", "Framework", "Concept", etc.
+                "type": str,  # Domain-agnostic types
                 "related_concepts": list[str],
                 "source_url": str,
                 "is_enriched": bool
             }
         """
         try:
-            # Search for entity information
-            search_query = f"{entity_name} programming technology definition"
-            search_results = self.you_client.search(
-                query=search_query,
-                num_results=3,
-            )
+            # Use Express Agent for intelligent, domain-agnostic enrichment
+            prompt = f"""Provide information about "{entity_name}". Include:
+1. Entity Type: Choose ONE from [concept, tool, person, organization, method, resource, topic, standard, event, location, other]
+2. Description: 2-3 sentences explaining what it is
+3. Related Entities: List 3-5 related entities or concepts (can be from any domain)
 
-            if not search_results.results:
+Format your response as:
+Type: [type]
+Description: [description]
+Related: [entity1, entity2, entity3]"""
+
+            agent_response = self.you_client.express_agent_search(prompt)
+
+            # Parse agent response
+            response_text = ""
+            for output in agent_response.get("output", []):
+                if output.get("type") in ["message.answer", "chat_node.answer"]:
+                    response_text = output.get("text", "")
+                    break
+
+            if not response_text:
                 return self._empty_enrichment(entity_name)
 
-            # Extract description from first result
-            top_result = search_results.results[0]
-            description = top_result.snippet[:200]  # Truncate long descriptions
+            # Parse the structured response
+            entity_type = "Other"
+            description = ""
+            related_concepts = []
 
-            # Determine entity type from context
-            entity_type = self._classify_entity_type(entity_name, description)
+            for line in response_text.split("\n"):
+                line = line.strip()
+                if line.startswith("Type:"):
+                    entity_type = line.replace("Type:", "").strip().title()
+                elif line.startswith("Description:"):
+                    description = line.replace("Description:", "").strip()
+                elif line.startswith("Related:"):
+                    related_text = line.replace("Related:", "").strip()
+                    # Split by comma and clean up
+                    related_concepts = [r.strip() for r in related_text.split(",") if r.strip()]
 
-            # Extract related concepts
-            related_concepts = self._extract_related_concepts(
-                entity_name, search_results
-            )
+            # Validate we got meaningful data
+            if not description:
+                return self._empty_enrichment(entity_name)
 
             return {
                 "name": entity_name,
-                "description": description,
+                "description": description[:300],  # Limit length
                 "type": entity_type,
-                "related_concepts": related_concepts[:5],  # Top 5 related
-                "source_url": top_result.url,
+                "related_concepts": related_concepts[:5],  # Top 5
+                "source_url": None,  # Agent doesn't provide specific URL
                 "is_enriched": True,
                 "enriched_at": datetime.now(UTC).isoformat(),
             }
 
         except Exception as e:
-            print(f"Failed to enrich entity '{entity_name}': {e}")
+            logger.error(f"Failed to enrich entity '{entity_name}': {e}")
             return self._empty_enrichment(entity_name)
+
+    def enrich_entities(self, entity_names: list[str]) -> list[dict]:
+        """
+        Enrich multiple entities individually using You.com search API.
+
+        Args:
+            entity_names: List of entity names to enrich
+
+        Returns:
+            List of enriched entity dictionaries
+
+        Example:
+            >>> enricher.enrich_entities(["React", "Vue", "Angular"])
+            [
+                {"name": "React", "type": "Framework", "description": "...", ...},
+                {"name": "Vue", "type": "Framework", "description": "...", ...}
+            ]
+        """
+        if not entity_names:
+            return []
+
+        # Enrich each entity individually
+        return [self.enrich_entity(name) for name in entity_names]
 
     def _empty_enrichment(self, entity_name: str) -> dict:
         """Return empty enrichment data."""
@@ -90,138 +141,3 @@ class EntityEnricher:
             "is_enriched": False,
             "enriched_at": None,
         }
-
-    def _classify_entity_type(self, entity_name: str, description: str) -> str:
-        """
-        Classify entity type based on name and description.
-
-        Args:
-            entity_name: Entity name
-            description: Entity description
-
-        Returns:
-            Entity type category
-        """
-        description_lower = description.lower()
-        name_lower = entity_name.lower()
-
-        # Framework patterns
-        if any(
-            keyword in description_lower or keyword in name_lower
-            for keyword in ["framework", "library", ".js", "react", "angular", "vue"]
-        ):
-            return "Framework"
-
-        # Database patterns
-        if any(
-            keyword in description_lower
-            for keyword in ["database", "db", "storage", "query"]
-        ):
-            return "Database"
-
-        # Language patterns
-        if any(
-            keyword in description_lower
-            for keyword in [
-                "programming language",
-                "language",
-                "python",
-                "javascript",
-                "java",
-            ]
-        ):
-            return "Programming Language"
-
-        # Tool patterns
-        if any(keyword in description_lower for keyword in ["tool", "cli", "command"]):
-            return "Tool"
-
-        # Platform patterns
-        if any(
-            keyword in description_lower
-            for keyword in ["platform", "service", "cloud", "aws", "azure"]
-        ):
-            return "Platform"
-
-        # Concept patterns
-        if any(
-            keyword in description_lower
-            for keyword in ["concept", "paradigm", "methodology", "pattern"]
-        ):
-            return "Concept"
-
-        # Default to Technology
-        return "Technology"
-
-    def _extract_related_concepts(
-        self, entity_name: str, search_results
-    ) -> list[str]:
-        """
-        Extract related concepts from search results.
-
-        Args:
-            entity_name: Entity name
-            search_results: Search results from You.com
-
-        Returns:
-            List of related concept names
-        """
-        related = set()
-
-        # Common tech keywords that might appear
-        tech_keywords = {
-            "react",
-            "vue",
-            "angular",
-            "python",
-            "javascript",
-            "typescript",
-            "node",
-            "django",
-            "flask",
-            "api",
-            "rest",
-            "graphql",
-            "docker",
-            "kubernetes",
-            "aws",
-            "mongodb",
-            "postgresql",
-            "redis",
-            "neo4j",
-            "graph",
-            "database",
-            "ml",
-            "ai",
-            "pytorch",
-            "tensorflow",
-        }
-
-        # Extract from snippets
-        for result in search_results.results[:3]:
-            snippet_lower = result.snippet.lower()
-
-            # Look for tech keywords
-            for keyword in tech_keywords:
-                if keyword in snippet_lower and keyword.lower() != entity_name.lower():
-                    related.add(keyword.title())
-
-        return sorted(list(related))
-
-    def check_trending(
-        self, entity_name: str, days: int = 7
-    ) -> Optional[dict]:
-        """
-        Check if an entity is trending in recent news.
-
-        Args:
-            entity_name: Entity to check
-            days: Look back this many days (default: 7)
-
-        Returns:
-            Dictionary with trending information or None if not available
-        """
-        # Note: You.com doesn't have a dedicated news endpoint in basic API
-        # This would use a news-specific search or RAG
-        # For now, we'll return a placeholder
-        return None

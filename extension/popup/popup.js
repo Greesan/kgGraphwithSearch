@@ -2,7 +2,8 @@
  * TabGraph Popup UI Script
  */
 
-// Configuration loaded from config.js
+import { CONFIG } from '../config.js';
+
 const BACKEND_URL = CONFIG.BACKEND_URL;
 
 // ============================================================================
@@ -103,8 +104,16 @@ async function loadDashboardData() {
       action: 'get-important-tabs'
     });
 
+    // Get all current tabs to calculate ungrouped count
+    const allTabs = await chrome.tabs.query({});
+    const validTabs = allTabs.filter(tab =>
+      tab.url &&
+      !tab.url.startsWith('chrome://') &&
+      !tab.url.startsWith('chrome-extension://')
+    );
+
     // Update UI
-    updateStats(data.clusters, importantTabs || []);
+    updateStats(data.clusters, importantTabs || [], validTabs);
     updateGroupsList(data.clusters);
 
   } catch (error) {
@@ -118,12 +127,16 @@ async function loadDashboardData() {
  *
  * @param {Array} clusters - Clusters from backend
  * @param {Array} importantTabs - List of important tab IDs
+ * @param {Array} allTabs - All current browser tabs
  */
-function updateStats(clusters, importantTabs) {
-  const totalTabs = clusters.reduce((sum, cluster) => sum + cluster.tab_count, 0);
+function updateStats(clusters, importantTabs, allTabs) {
+  const groupedTabs = clusters.reduce((sum, cluster) => sum + cluster.tab_count, 0);
+  const totalTabs = allTabs.length;
+  const ungroupedTabs = totalTabs - groupedTabs;
 
   document.getElementById('groups-count').textContent = clusters.length;
-  document.getElementById('tabs-count').textContent = totalTabs;
+  document.getElementById('tabs-count').textContent = groupedTabs;
+  document.getElementById('tabs-free-count').textContent = Math.max(0, ungroupedTabs);
   document.getElementById('important-count').textContent = importantTabs.length;
 }
 
@@ -149,18 +162,170 @@ function updateGroupsList(clusters) {
     groupItem.className = 'group-item';
     groupItem.style.borderLeftColor = getColorHex(cluster.color);
 
-    groupItem.innerHTML = `
-      <div class="group-name">${escapeHtml(cluster.name)}</div>
-      <div class="group-meta">${cluster.tab_count} tabs</div>
+    const headerDiv = document.createElement('div');
+    headerDiv.style.display = 'flex';
+    headerDiv.style.alignItems = 'center';
+    headerDiv.style.gap = '8px';
+
+    headerDiv.innerHTML = `
+      <div style="flex: 1;">
+        <div class="group-name">${escapeHtml(cluster.name)}</div>
+        <div class="group-meta">${cluster.tab_count} tabs</div>
+      </div>
+      <span class="expand-icon">▶</span>
     `;
 
-    groupItem.addEventListener('click', () => {
-      // TODO: Show group details or highlight tabs in browser
-      console.log('Clicked group:', cluster);
+    groupItem.appendChild(headerDiv);
+
+    // Add click handler to toggle tree view and activate group
+    headerDiv.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await toggleGroupExpansion(groupItem, cluster);
     });
 
     listElement.appendChild(groupItem);
   });
+}
+
+/**
+ * Toggle expansion of a group item to show/hide tabs tree.
+ *
+ * @param {HTMLElement} groupItem - The group item DOM element
+ * @param {Object} cluster - The cluster data
+ */
+async function toggleGroupExpansion(groupItem, cluster) {
+  const isExpanded = groupItem.classList.contains('expanded');
+
+  if (isExpanded) {
+    // Collapse the group
+    groupItem.classList.remove('expanded');
+    const treeView = groupItem.querySelector('.tabs-tree');
+    if (treeView) {
+      treeView.remove();
+    }
+  } else {
+    // Expand the group
+    groupItem.classList.add('expanded');
+
+    // Activate the tab group in Chrome
+    await activateTabGroup(cluster);
+
+    // Create and append the tree view
+    const treeView = await createTabsTreeView(cluster);
+    groupItem.appendChild(treeView);
+  }
+}
+
+/**
+ * Activate a tab group in Chrome (bring it to focus).
+ *
+ * @param {Object} cluster - The cluster data with tabs
+ */
+async function activateTabGroup(cluster) {
+  try {
+    if (cluster.tabs && cluster.tabs.length > 0) {
+      // Get the first tab ID from the cluster
+      const firstTabId = cluster.tabs[0].id;
+
+      // Query to check if tab still exists
+      const tabs = await chrome.tabs.query({});
+      const tabExists = tabs.find(t => t.id === firstTabId);
+
+      if (tabExists) {
+        // Activate the first tab in the group (which will show the group)
+        await chrome.tabs.update(firstTabId, { active: true });
+        // Focus the window containing the tab
+        await chrome.windows.update(tabExists.windowId, { focused: true });
+      }
+    }
+  } catch (error) {
+    console.error('Error activating tab group:', error);
+  }
+}
+
+/**
+ * Create a tree view of tabs for a cluster.
+ *
+ * @param {Object} cluster - The cluster data
+ * @returns {HTMLElement} The tree view element
+ */
+async function createTabsTreeView(cluster) {
+  const treeView = document.createElement('div');
+  treeView.className = 'tabs-tree';
+
+  // Get current tabs to verify they still exist
+  const currentTabs = await chrome.tabs.query({});
+  const currentTabIds = new Set(currentTabs.map(t => t.id));
+
+  // Filter to only existing tabs
+  const validTabs = cluster.tabs.filter(tab => currentTabIds.has(tab.id));
+
+  if (validTabs.length === 0) {
+    treeView.innerHTML = '<p class="loading" style="font-size: 11px; padding: 8px;">No tabs found in this group</p>';
+    return treeView;
+  }
+
+  // Create a tab item for each tab
+  validTabs.forEach(tab => {
+    const tabItem = document.createElement('div');
+    tabItem.className = 'tab-item';
+
+    // Create favicon
+    const favicon = document.createElement('img');
+    favicon.className = 'tab-favicon';
+    if (tab.favicon_url) {
+      favicon.src = tab.favicon_url;
+      favicon.onerror = () => {
+        favicon.style.display = 'none';
+        const placeholder = document.createElement('div');
+        placeholder.className = 'tab-favicon default';
+        tabItem.insertBefore(placeholder, tabItem.firstChild);
+      };
+    } else {
+      favicon.className = 'tab-favicon default';
+    }
+
+    // Create title
+    const title = document.createElement('div');
+    title.className = 'tab-title';
+    title.textContent = tab.title || 'Untitled';
+    title.title = tab.title || 'Untitled';
+
+    // Create URL display
+    const urlDiv = document.createElement('div');
+    urlDiv.className = 'tab-url';
+    try {
+      const url = new URL(tab.url);
+      urlDiv.textContent = url.hostname;
+      urlDiv.title = tab.url;
+    } catch {
+      urlDiv.textContent = tab.url;
+      urlDiv.title = tab.url;
+    }
+
+    // Append elements
+    tabItem.appendChild(favicon);
+    tabItem.appendChild(title);
+    tabItem.appendChild(urlDiv);
+
+    // Add click handler to activate the tab
+    tabItem.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await chrome.tabs.update(tab.id, { active: true });
+        const tabInfo = currentTabs.find(t => t.id === tab.id);
+        if (tabInfo) {
+          await chrome.windows.update(tabInfo.windowId, { focused: true });
+        }
+      } catch (error) {
+        console.error('Error activating tab:', error);
+      }
+    });
+
+    treeView.appendChild(tabItem);
+  });
+
+  return treeView;
 }
 
 /**

@@ -13,7 +13,9 @@ from datetime import datetime, UTC
 import numpy as np
 from openai import OpenAI
 
-from kg_graph_search.config import get_settings
+from kg_graph_search.config import get_settings, get_logger
+
+logger = get_logger(__name__)
 from kg_graph_search.agents.models import (
     Tab,
     TabCluster,
@@ -299,7 +301,7 @@ Generate the name (no quotes, just the name):"""
 
         except Exception as e:
             # Fallback to simple naming
-            print(f"Warning: Failed to generate cluster name via LLM: {e}")
+            logger.warning(f"Failed to generate cluster name via LLM: {e}")
             return f"Cluster {cluster.id[:8]}"
 
     def _store_tab_in_graph(self, tab: Tab) -> None:
@@ -385,7 +387,7 @@ Generate the name (no quotes, just the name):"""
                 )
         except Exception as e:
             # Silently fail enrichment - don't block tab processing
-            print(f"Failed to enrich entity '{entity_name}': {e}")
+            logger.warning(f"Failed to enrich entity '{entity_name}': {e}")
 
     def _update_cluster_shared_entities(self, cluster: TabCluster) -> None:
         """
@@ -501,7 +503,7 @@ Generate the name (no quotes, just the name):"""
             new_name = self.generate_cluster_name(cluster)
             cluster.name = new_name
             cluster.tabs_added_since_naming = 0  # Reset counter
-            print(f"Renamed cluster {cluster.id[:8]} to: {new_name}")
+            logger.info(f"Renamed cluster {cluster.id[:8]} to: {new_name}")
 
     def remove_tab_from_cluster(self, cluster: TabCluster, tab_id: int) -> bool:
         """
@@ -538,7 +540,7 @@ Generate the name (no quotes, just the name):"""
             # Check if cluster should be deleted
             if cluster.mark_for_deletion():
                 self.clusters.remove(cluster)
-                print(
+                logger.info(
                     f"Deleted cluster {cluster.id[:8]} '{cluster.name}' (< 2 tabs remaining)"
                 )
 
@@ -582,7 +584,7 @@ Generate the name (no quotes, just the name):"""
             cluster.tabs_added_since_naming = 0  # Reset since we just named it
 
         self.clusters.append(cluster)
-        print(f"Created new cluster: {cluster.name} (ID: {cluster.id[:8]})")
+        logger.info(f"Created new cluster: {cluster.name} (ID: {cluster.id[:8]})")
 
         return cluster
 
@@ -603,7 +605,8 @@ Generate the name (no quotes, just the name):"""
         Returns:
             The cluster the tab was assigned to
         """
-        # Extract entities if not present
+        # Extract entities if not present (single-tab fallback)
+        # Note: For batch processing, entities are extracted in process_tabs_batch()
         if not tab.entities:
             tab.entities = self.entity_extractor.extract_entities(
                 title=tab.title,
@@ -621,14 +624,14 @@ Generate the name (no quotes, just the name):"""
 
         if result:
             cluster, similarity = result
-            print(
+            logger.info(
                 f"Assigning tab '{tab.title}' to cluster '{cluster.name}' (similarity: {similarity:.2f})"
             )
             self.add_tab_to_cluster(cluster, tab)
             return cluster
         else:
             # Create new cluster
-            print(f"Creating new cluster for tab '{tab.title}'")
+            logger.info(f"Creating new cluster for tab '{tab.title}'")
             return self.create_new_cluster(tab)
 
     def process_tabs_batch(self, tabs: list[Tab]) -> ClusteringResult:
@@ -657,6 +660,57 @@ Generate the name (no quotes, just the name):"""
             for tab, embedding in zip(tabs_needing_embeddings, embeddings):
                 tab.embedding = embedding
 
+        # Batch extract entities for all tabs that need them
+        tabs_needing_entities = [tab for tab in tabs if not tab.entities]
+        if tabs_needing_entities:
+            tabs_data = [{"title": tab.title, "url": tab.url} for tab in tabs_needing_entities]
+            all_entities = self.entity_extractor.extract_entities_batch(tabs_data, max_entities=8)
+
+            # Assign entities back to tabs
+            for tab, entities in zip(tabs_needing_entities, all_entities):
+                tab.entities = entities
+
+            logger.info(f"Batch extracted entities for {len(tabs_needing_entities)} tabs")
+
+        # Batch enrich entities if enricher is available
+        if self.entity_enricher and self.graph_db:
+            # Collect all unique entities across all tabs
+            all_entity_names = set()
+            for tab in tabs:
+                if tab.entities:
+                    all_entity_names.update(tab.entities)
+
+            # Filter to entities that need enrichment
+            entities_needing_enrichment = []
+            for entity_name in all_entity_names:
+                entity = self.graph_db.get_entity_by_name(entity_name)
+                if not entity or not entity.is_enriched:
+                    entities_needing_enrichment.append(entity_name)
+
+            # Enrich entities individually
+            if entities_needing_enrichment:
+                logger.info(f"Enriching {len(entities_needing_enrichment)} entities...")
+                enriched_data = self.entity_enricher.enrich_entities(entities_needing_enrichment)
+
+                # Store enriched entities in knowledge graph
+                for enrichment in enriched_data:
+                    if enrichment.get("is_enriched"):
+                        from kg_graph_search.graph.models import Entity
+
+                        entity = Entity(
+                            name=enrichment["name"],
+                            entity_type=enrichment["type"],
+                            description=None,  # Optional field, use web_description for actual content
+                            web_description=enrichment["description"],
+                            related_concepts=enrichment.get("related_concepts", []),
+                            source_url=enrichment.get("source_url"),
+                            is_enriched=True,
+                            enriched_at=datetime.now(UTC)
+                        )
+                        self.graph_db.add_entity(entity)
+
+                logger.info(f"Successfully enriched and stored {len(enriched_data)} entities")
+
         # Track which clusters were created during this batch
         clusters_before = set(c.id for c in self.clusters)
 
@@ -667,13 +721,13 @@ Generate the name (no quotes, just the name):"""
 
             if result:
                 cluster, similarity = result
-                print(
+                logger.info(
                     f"Assigning tab '{tab.title}' to cluster '{cluster.name}' (similarity: {similarity:.2f})"
                 )
                 self.add_tab_to_cluster(cluster, tab)
             else:
                 # Create new cluster with deferred naming
-                print(f"Creating new cluster for tab '{tab.title}'")
+                logger.info(f"Creating new cluster for tab '{tab.title}'")
                 self.create_new_cluster(tab, defer_naming=True)
 
         # Name all newly created clusters in batch (after they have multiple tabs)
@@ -687,9 +741,9 @@ Generate the name (no quotes, just the name):"""
                 if cluster.tab_count >= 2:
                     cluster.name = self.generate_cluster_name(cluster)
                     cluster.tabs_added_since_naming = 0
-                    print(f"Named new cluster: {cluster.name} (ID: {cluster.id[:8]})")
+                    logger.info(f"Named new cluster: {cluster.name} (ID: {cluster.id[:8]})")
                 else:
-                    print(f"Skipped naming single-tab cluster (ID: {cluster.id[:8]})")
+                    logger.debug(f"Skipped naming single-tab cluster (ID: {cluster.id[:8]})")
 
         return ClusteringResult(
             clusters=self.clusters.copy(),
@@ -719,6 +773,36 @@ Generate the name (no quotes, just the name):"""
             List of all clusters
         """
         return self.clusters.copy()
+
+    def get_hub_entities(self, cluster: TabCluster, top_n: int = 3) -> list[str]:
+        """
+        Get the most common entities in a cluster (hub entities).
+
+        Hub entities are those that appear in the most tabs within the cluster.
+        These are used for efficient relationship discovery.
+
+        Args:
+            cluster: The cluster to analyze
+            top_n: Number of top entities to return (default: 3)
+
+        Returns:
+            List of entity names, sorted by frequency (most common first)
+
+        Example:
+            >>> hub_entities = clusterer.get_hub_entities(cluster, top_n=3)
+            ['React', 'JavaScript', 'Hooks']
+        """
+        from collections import Counter
+
+        # Count entity occurrences across all tabs in cluster
+        entity_counts = Counter()
+
+        for tab in cluster.tabs:
+            if tab.entities:
+                entity_counts.update(tab.entities)
+
+        # Return top N most common entities
+        return [entity for entity, count in entity_counts.most_common(top_n)]
 
     def get_cluster_stats(self) -> dict:
         """Get statistics about current clusters.

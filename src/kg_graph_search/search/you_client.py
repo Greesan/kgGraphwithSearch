@@ -29,6 +29,7 @@ class YouAPIClient:
     """Client for interacting with You.com API."""
 
     BASE_URL = "https://api.ydc-index.io"
+    AGENT_BASE_URL = "https://api.you.com"  # Separate base URL for agent APIs
 
     def __init__(self, api_key: str):
         """
@@ -44,6 +45,14 @@ class YouAPIClient:
                 "Content-Type": "application/json",
             },
             timeout=30.0,
+        )
+        # Separate client for agent APIs (uses Bearer token)
+        self.agent_client = httpx.Client(
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=60.0,  # Agents may take longer
         )
 
     async def async_client(self) -> httpx.AsyncClient:
@@ -180,9 +189,130 @@ class YouAPIClient:
         response.raise_for_status()
         return response.json()
 
+    def express_agent_search(
+        self,
+        input: str,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Use You.com Express Agent for intelligent search with reasoning.
+
+        Express Agent is optimized for low-latency queries that require web search.
+        It provides more contextualized answers than basic search.
+
+        Args:
+            input: Query or prompt for the agent
+            stream: Enable server-sent events for streaming (default: False)
+
+        Returns:
+            Agent response with answer and web search results
+
+        Example:
+            >>> client.express_agent_search(
+            ...     "What are the best practices for React Hooks in 2025?"
+            ... )
+            {
+                "output": [
+                    {"type": "web_search.results", "content": "...", ...},
+                    {"type": "chat_node.answer", "text": "Based on current best practices..."}
+                ]
+            }
+        """
+        payload = {
+            "agent": "express",
+            "input": input,
+            "stream": stream,
+        }
+
+        response = self.agent_client.post(
+            f"{self.AGENT_BASE_URL}/v1/agents/runs",
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def custom_agent_run(
+        self,
+        agent_id: str,
+        input: str,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Run a Custom Agent with specific instructions.
+
+        Custom Agents allow you to define specialized behaviors and instructions
+        for specific use cases (e.g., summarization, analysis, etc.).
+
+        Args:
+            agent_id: ID of your custom agent (created via You.com UI)
+            input: Query or prompt for the agent
+            stream: Enable server-sent events for streaming (default: False)
+
+        Returns:
+            Agent response based on custom instructions
+
+        Note:
+            Custom agents must be created via the You.com dashboard first.
+        """
+        payload = {
+            "agent": agent_id,
+            "input": input,
+            "stream": stream,
+        }
+
+        response = self.agent_client.post(
+            f"{self.AGENT_BASE_URL}/v1/agents/runs",
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def advanced_agent_run(
+        self,
+        input: str,
+        context: Optional[list[dict]] = None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Use You.com Advanced Agent for complex multi-step reasoning.
+
+        Advanced Agent can handle complex queries requiring planning, research,
+        and multi-step reasoning across multiple sources.
+
+        Args:
+            input: Query or prompt for the agent
+            context: Optional conversation context for continuity
+            stream: Enable server-sent events for streaming (default: False)
+
+        Returns:
+            Agent response with detailed reasoning and sources
+
+        Example:
+            >>> client.advanced_agent_run(
+            ...     "Analyze the trade-offs between REST and GraphQL APIs",
+            ...     context=[{"role": "user", "content": "I'm building a mobile app"}]
+            ... )
+        """
+        payload = {
+            "agent": "advanced",
+            "input": input,
+            "stream": stream,
+        }
+
+        if context:
+            payload["context"] = context
+
+        response = self.agent_client.post(
+            f"{self.AGENT_BASE_URL}/v1/agents/runs",
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def close(self):
-        """Close the HTTP client."""
+        """Close the HTTP clients."""
         self.client.close()
+        self.agent_client.close()
 
     def __enter__(self):
         """Context manager entry."""

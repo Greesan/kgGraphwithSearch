@@ -5,12 +5,15 @@ SQLite database handler for the knowledge graph.
 import sqlite3
 import struct
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Optional
 
+from kg_graph_search.config import get_logger
 from .base import GraphStore
 from .models import Entity, TemporalValidityRange, Triplet
+
+logger = get_logger(__name__)
 
 
 class KnowledgeGraphDB(GraphStore):
@@ -1118,7 +1121,7 @@ class KnowledgeGraphDB(GraphStore):
                 entity_type,
                 related_concepts_json,
                 source_url,
-                datetime.now(),
+                datetime.now(UTC),
                 entity_id,
             ),
         )
@@ -1158,10 +1161,13 @@ class KnowledgeGraphDB(GraphStore):
         # Check if cache has expired
         if row["enriched_at"]:
             enriched_at = datetime.fromisoformat(row["enriched_at"])
-            from datetime import timedelta
+
+            # Ensure both datetimes are timezone-aware
+            if enriched_at.tzinfo is None:
+                enriched_at = enriched_at.replace(tzinfo=UTC)
 
             cache_expiry = enriched_at + timedelta(days=cache_ttl_days)
-            if datetime.now() > cache_expiry:
+            if datetime.now(UTC) > cache_expiry:
                 return True
 
         return False
@@ -1184,7 +1190,7 @@ class KnowledgeGraphDB(GraphStore):
         # Calculate cache expiry timestamp
         from datetime import timedelta
 
-        cache_expiry = datetime.now() - timedelta(days=cache_ttl_days)
+        cache_expiry = datetime.now(UTC) - timedelta(days=cache_ttl_days)
 
         cursor.execute(
             """
@@ -1225,6 +1231,159 @@ class KnowledgeGraphDB(GraphStore):
             )
 
         return entities
+
+    def get_entity_by_name(self, name: str, entity_type: Optional[str] = None) -> Optional[Entity]:
+        """
+        Get an entity by name and optionally type.
+
+        Args:
+            name: Entity name
+            entity_type: Optional entity type for disambiguation
+
+        Returns:
+            Entity if found, None otherwise
+        """
+        cursor = self.conn.cursor()
+
+        if entity_type:
+            cursor.execute(
+                "SELECT * FROM entities WHERE name = ? AND entity_type = ?",
+                (name, entity_type)
+            )
+        else:
+            cursor.execute("SELECT * FROM entities WHERE name = ?", (name,))
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        # Parse related_concepts JSON
+        related_concepts = []
+        if row["related_concepts"]:
+            try:
+                related_concepts = json.loads(row["related_concepts"])
+            except json.JSONDecodeError:
+                related_concepts = []
+
+        return Entity(
+            id=row["id"],
+            name=row["name"],
+            entity_type=row["entity_type"],
+            description=row["description"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            web_description=row["web_description"],
+            related_concepts=related_concepts,
+            source_url=row["source_url"],
+            is_enriched=bool(row["is_enriched"]),
+            enriched_at=datetime.fromisoformat(row["enriched_at"]) if row["enriched_at"] else None,
+        )
+
+    def get_relationships_for_entities(self, entity_names: list[str]) -> list[Triplet]:
+        """
+        Get all relationships between the given entities.
+
+        Args:
+            entity_names: List of entity names
+
+        Returns:
+            List of triplets where both subject and object are in the entity list
+        """
+        if not entity_names:
+            return []
+
+        cursor = self.conn.cursor()
+
+        # Build query with placeholders for entity names
+        placeholders = ",".join("?" * len(entity_names))
+        query = f"""
+            SELECT t.*,
+                   e1.name as subject_name,
+                   e2.name as object_name
+            FROM triplets t
+            JOIN entities e1 ON t.subject_id = e1.id
+            JOIN entities e2 ON t.object_id = e2.id
+            WHERE e1.name IN ({placeholders})
+              AND e2.name IN ({placeholders})
+              AND t.is_current = 1
+        """
+
+        # Query needs entity names twice (for subject and object)
+        params = entity_names + entity_names
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        triplets = []
+        for row in rows:
+            temporal = TemporalValidityRange(
+                start_time=datetime.fromisoformat(row["start_time"]) if row["start_time"] else None,
+                end_time=datetime.fromisoformat(row["end_time"]) if row["end_time"] else None,
+                is_current=bool(row["is_current"]),
+            )
+
+            triplets.append(
+                Triplet(
+                    id=row["id"],
+                    subject_id=row["subject_id"],
+                    subject_name=row["subject_name"],
+                    predicate=row["predicate"],
+                    object_id=row["object_id"],
+                    object_name=row["object_name"],
+                    temporal_validity=temporal,
+                    confidence=row["confidence"],
+                    source=row["source"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+            )
+
+        return triplets
+
+    def store_relationships(self, relationships: list[dict]) -> int:
+        """
+        Store multiple relationships discovered from agent analysis.
+
+        Args:
+            relationships: List of relationship dicts with keys:
+                - entity1: str (subject entity name)
+                - entity2: str (object entity name)
+                - relationship_type: str (predicate)
+                - confidence: float
+                - explanation: str (optional, stored in source field)
+
+        Returns:
+            Number of relationships successfully stored
+        """
+        stored_count = 0
+
+        for rel in relationships:
+            try:
+                # Get or create entities
+                entity1 = self.get_entity_by_name(rel["entity1"])
+                entity2 = self.get_entity_by_name(rel["entity2"])
+
+                if not entity1 or not entity2:
+                    logger.warning(f"Skipping relationship: entity not found ({rel['entity1']} or {rel['entity2']})")
+                    continue
+
+                # Create triplet
+                triplet = Triplet(
+                    subject_id=entity1.id,
+                    subject_name=entity1.name,
+                    predicate=rel["relationship_type"],
+                    object_id=entity2.id,
+                    object_name=entity2.name,
+                    confidence=rel["confidence"],
+                    source=f"you_express_agent: {rel.get('explanation', '')}",
+                    temporal_validity=TemporalValidityRange(is_current=True)
+                )
+
+                self.add_triplet(triplet)
+                stored_count += 1
+
+            except Exception as e:
+                logger.error(f"Failed to store relationship {rel.get('entity1')} -> {rel.get('entity2')}: {e}")
+                continue
+
+        return stored_count
 
     def close(self):
         """Close the database connection."""

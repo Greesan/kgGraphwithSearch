@@ -4,7 +4,7 @@
  * Edit this file to customize extension behavior.
  */
 
-const CONFIG = {
+export const CONFIG = {
   // Backend server URL
   // Change this if running backend on different port or remote server
   BACKEND_URL: 'http://localhost:8000',
@@ -18,8 +18,3 @@ const CONFIG = {
   // Note: Backend also has this setting - should match
   SIMILARITY_THRESHOLD: 0.70,
 };
-
-// Export for use in other scripts
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = CONFIG;
-}

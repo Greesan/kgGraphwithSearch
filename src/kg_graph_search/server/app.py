@@ -14,9 +14,12 @@ from pathlib import Path
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from kg_graph_search.config import get_logger
 from kg_graph_search.agents.models import Tab
 from kg_graph_search.agents.tab_clusterer import TabClusterer
 from kg_graph_search.graph.database import KnowledgeGraphDB
+
+logger = get_logger(__name__)
 from kg_graph_search.server.models import (
     TabsIngestRequest,
     TabsIngestResponse,
@@ -183,7 +186,7 @@ async def get_clusters():
                 id=tab.id,
                 title=tab.title,
                 url=tab.url,
-                important=False,  # TODO: Track important flag
+                important=tab.important,
                 entities=tab.entities,
             )
             for tab in cluster.tabs
@@ -210,23 +213,93 @@ async def get_clusters():
 @app.get("/api/recommendations", response_model=RecommendationsResponse)
 async def get_recommendations(cluster_id: str | None = None, limit: int = 10):
     """
-    Get content recommendations based on current knowledge graph.
+    Get intelligent content recommendations using You.com Express Agent.
 
-    This is a stub for MVP - will be implemented in Phase 2.
+    Uses AI reasoning to provide contextualized recommendations based on
+    the user's current research topics and knowledge graph.
 
     Args:
-        cluster_id: Optional cluster ID to filter recommendations
+        cluster_id: Optional cluster ID for targeted recommendations
         limit: Maximum recommendations to return
 
     Returns:
-        List of recommended content
+        List of intelligent recommendations with reasoning
     """
-    # TODO: Implement recommendations using You.com APIs
-    # For now, return empty list
-    return RecommendationsResponse(
-        recommendations=[],
-        total=0,
-    )
+    clusterer = get_clusterer()
+    settings = get_settings()
+
+    # Check if You.com API is configured
+    if not settings.you_api_key:
+        logger.warning("You.com API key not configured - returning empty recommendations")
+        return RecommendationsResponse(recommendations=[], total=0)
+
+    try:
+        from kg_graph_search.search.you_client import YouAPIClient
+
+        you_client = YouAPIClient(settings.you_api_key)
+
+        # Get cluster context and discover relationships (on-demand)
+        if cluster_id:
+            cluster = clusterer.get_cluster_by_id(cluster_id)
+            if not cluster:
+                return RecommendationsResponse(recommendations=[], total=0)
+
+            # Build context from specific cluster with shared entities
+            query_context = f"researching {cluster.name} with focus on: {', '.join(cluster.shared_entities[:5])}"
+        else:
+            # Build context from all clusters
+            clusters = clusterer.get_all_clusters()
+            if not clusters:
+                return RecommendationsResponse(recommendations=[], total=0)
+
+            top_clusters = sorted(clusters, key=lambda c: c.tab_count, reverse=True)[:3]
+            topics = [c.name for c in top_clusters]
+            query_context = f"researching topics: {', '.join(topics)}"
+
+        # Use Express Agent for intelligent recommendations
+        agent_query = f"What are the best resources, tutorials, and articles for someone {query_context}? Suggest {limit} high-quality, current resources."
+
+        agent_response = you_client.express_agent_search(agent_query)
+
+        # Parse agent response
+        recommendations = []
+
+        # Extract answer and search results from agent output
+        answer_text = ""
+        search_results = []
+
+        for output in agent_response.get("output", []):
+            # Handle both "chat_node.answer" and "message.answer" types
+            if output.get("type") in ["chat_node.answer", "message.answer"]:
+                answer_text = output.get("text", "")
+            elif output.get("type") == "web_search.results":
+                # Agent includes search results in response
+                search_results = output.get("results", [])
+
+        # Convert search results to recommendations
+        for idx, result in enumerate(search_results[:limit]):
+            recommendations.append({
+                "title": result.get("title", ""),
+                "url": result.get("url", ""),
+                "snippet": result.get("description", "")[:200],
+                "reason": f"Recommended by AI: {answer_text[:100]}..." if answer_text else "Relevant to your research",
+                "relevance_score": 1.0 - (idx * 0.1),  # Descending relevance
+                "source": "you_express_agent",
+                "cluster_id": cluster_id,
+                "is_news": False,
+            })
+
+        you_client.close()
+
+        return RecommendationsResponse(
+            recommendations=recommendations,
+            total=len(recommendations),
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating recommendations: {e}")
+        # Graceful fallback
+        return RecommendationsResponse(recommendations=[], total=0)
 
 
 @app.get("/api/graph/visualization", response_model=GraphVisualizationResponse)
@@ -284,13 +357,16 @@ async def get_graph_visualization(
 
     nodes = []
     edges = []
+    entity_nodes_map = {}  # Track entities: {entity_name: {id, cluster_ids}}
 
     # Create cluster nodes and tab nodes
     for cluster in clusters:
+        cluster_id = f"cluster_{cluster.id}"
+
         # Add cluster node
         cluster_node = GraphNode(
             data=GraphNodeData(
-                id=f"cluster_{cluster.id}",
+                id=cluster_id,
                 type="cluster",
                 label=cluster.name,
                 color=cluster.color.value,
@@ -302,30 +378,113 @@ async def get_graph_visualization(
 
         # Add tab nodes for this cluster
         for tab in cluster.tabs:
+            tab_id = f"tab_{tab.id}"
+
             tab_node = GraphNode(
                 data=GraphNodeData(
-                    id=f"tab_{tab.id}",
+                    id=tab_id,
                     type="tab",
                     label=tab.title[:50],  # Truncate long titles
-                    parent=f"cluster_{cluster.id}",
+                    # DO NOT set parent - causes compound nodes (boxes)
+                    # Store cluster info for entity view color-coding
+                    cluster_id=cluster_id,  # Custom field for entity view
+                    color=cluster.color.value,  # Store cluster color
                     url=tab.url,
-                    important=False,  # TODO: Track important flag in Tab model
+                    important=tab.important,
                     entities=tab.entities,
                     opened_at=tab.created_at.isoformat() if tab.created_at else None,
                 )
             )
             nodes.append(tab_node)
 
-            # Add edge from tab to cluster
+            # Add edge from cluster to tab (high weight for cluster view)
             edge = GraphEdge(
                 data=GraphEdgeData(
-                    id=f"edge_tab{tab.id}_cluster{cluster.id}",
-                    source=f"tab_{tab.id}",
-                    target=f"cluster_{cluster.id}",
+                    id=f"edge_cluster{cluster.id}_tab{tab.id}",
+                    source=cluster_id,
+                    target=tab_id,
                     type="contains",
+                    weight=10.0,  # High weight keeps tabs near cluster
                 )
             )
             edges.append(edge)
+
+            # Track entities for this tab
+            for entity_name in tab.entities:
+                if entity_name not in entity_nodes_map:
+                    entity_nodes_map[entity_name] = {
+                        "cluster_ids": set(),
+                        "tab_ids": set()
+                    }
+                entity_nodes_map[entity_name]["cluster_ids"].add(cluster_id)
+                entity_nodes_map[entity_name]["tab_ids"].add(tab_id)
+
+    # Add entity nodes
+    graph_db = get_graph_db()
+    logger.info(f"Adding {len(entity_nodes_map)} entity nodes to graph")
+
+    for entity_name, entity_info in entity_nodes_map.items():
+        # Fetch entity from database to get enrichment data
+        entity = graph_db.get_entity_by_name(entity_name)
+        entity_id = f"entity_{entity.id}" if entity else f"entity_{hash(entity_name) % 100000}"
+
+        entity_node = GraphNode(
+            data=GraphNodeData(
+                id=entity_id,
+                type="entity",
+                label=entity_name,
+                description=entity.web_description if entity and entity.web_description else None,
+                cluster_ids=list(entity_info["cluster_ids"]),
+            )
+        )
+        nodes.append(entity_node)
+        logger.debug(f"Added entity node: {entity_name} ({entity_id})")
+
+        # Add edges from tabs to this entity
+        for tab_id in entity_info["tab_ids"]:
+            edge = GraphEdge(
+                data=GraphEdgeData(
+                    id=f"edge_{tab_id}_{entity_id}",
+                    source=tab_id,
+                    target=entity_id,
+                    type="references",
+                    weight=1.0,  # Low weight for entity view
+                )
+            )
+            edges.append(edge)
+
+    # Add entity-entity relationship edges (from knowledge graph triplets)
+    if graph_db:
+        try:
+            # Get top relationships between entities in this graph
+            entity_ids_in_graph = [
+                entity.id for entity_name in entity_nodes_map.keys()
+                if (entity := graph_db.get_entity_by_name(entity_name))
+            ]
+
+            # Fetch triplets between these entities (limit to prevent overcrowding)
+            triplets = graph_db.get_all_triplets(limit=50)
+
+            for triplet in triplets:
+                subject_id = f"entity_{triplet.subject_id}"
+                object_id = f"entity_{triplet.object_id}"
+
+                # Only add edge if both entities are in our graph
+                if any(n.data.id == subject_id for n in nodes) and any(n.data.id == object_id for n in nodes):
+                    edge = GraphEdge(
+                        data=GraphEdgeData(
+                            id=f"edge_rel_{triplet.subject_id}_{triplet.object_id}",
+                            source=subject_id,
+                            target=object_id,
+                            type="relationship",
+                            label=triplet.predicate[:20],  # Truncate long predicates
+                            weight=triplet.confidence,
+                            confidence=triplet.confidence,
+                        )
+                    )
+                    edges.append(edge)
+        except Exception as e:
+            logger.warning(f"Failed to fetch entity relationships: {e}")
 
     # Handle singleton tabs if requested
     if include_singletons:
@@ -339,6 +498,8 @@ async def get_graph_visualization(
     metadata = {
         "cluster_count": len(clusters),
         "tab_count": sum(c.tab_count for c in clusters),
+        "entity_count": len(entity_nodes_map),
+        "relationship_count": len([e for e in edges if e.data.type == "relationship"]),
         "time_range_hours": time_range_hours,
         "include_singletons": include_singletons,
         "min_cluster_size": min_cluster_size,

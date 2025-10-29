@@ -121,16 +121,18 @@ class GraphNodeData(BaseModel):
     """Data payload for a graph node."""
 
     id: str
-    type: str  # "cluster" or "tab"
+    type: str  # "cluster", "tab", or "entity"
     label: str
     color: Optional[str] = None
-    parent: Optional[str] = None  # For tabs, ID of parent cluster
+    cluster_id: Optional[str] = None  # For tabs - which cluster they belong to (NOT parent, to avoid compound nodes)
     url: Optional[str] = None  # For tabs
     important: Optional[bool] = None  # For tabs
     entities: Optional[list[str]] = None  # For tabs
     opened_at: Optional[str] = None  # For tabs
     tab_count: Optional[int] = None  # For clusters
     shared_entities: Optional[list[str]] = None  # For clusters
+    description: Optional[str] = None  # For entities
+    cluster_ids: Optional[list[str]] = None  # For entities - which clusters reference this entity
 
 
 class GraphNode(BaseModel):
@@ -145,7 +147,10 @@ class GraphEdgeData(BaseModel):
     id: str
     source: str
     target: str
-    type: str  # "contains" for cluster->tab
+    type: str  # "contains" (cluster->tab), "references" (tab->entity), "relationship" (entity->entity)
+    label: Optional[str] = None  # For relationship edges (predicate)
+    weight: Optional[float] = None  # Edge weight for layout algorithm (higher = stronger attraction)
+    confidence: Optional[float] = None  # For relationship edges
 
 
 class GraphEdge(BaseModel):
