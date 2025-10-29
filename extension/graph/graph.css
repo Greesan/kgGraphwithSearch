@@ -1,0 +1,346 @@
+/**
+ * TabGraph Knowledge Graph Visualization Styles
+ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background: #f5f5f5;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ============================================================================
+ * Header
+ * ========================================================================= */
+
+header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 1rem 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.controls button {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: white;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.controls button:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.controls button span {
+  font-size: 1rem;
+}
+
+/* ============================================================================
+ * Filters
+ * ========================================================================= */
+
+.filters {
+  background: white;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+}
+
+.filters label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+.filters input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.filters select,
+.filters input[type="number"] {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.filters input[type="number"] {
+  width: 60px;
+}
+
+/* ============================================================================
+ * Graph Container
+ * ========================================================================= */
+
+#cy {
+  flex: 1;
+  background: #fafafa;
+  position: relative;
+}
+
+/* ============================================================================
+ * Info Panel
+ * ========================================================================= */
+
+.info-panel {
+  position: absolute;
+  top: 100px;
+  right: 20px;
+  width: 350px;
+  max-height: calc(100vh - 200px);
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  transition: all 0.3s;
+  z-index: 1000;
+}
+
+.info-panel.hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(20px);
+}
+
+.info-header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.info-header h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+#close-info {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+#close-info:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+#info-content {
+  padding: 1rem;
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+}
+
+.info-section {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.info-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.info-section strong {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: #667eea;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.info-section a {
+  color: #4A90E2;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.info-section a:hover {
+  text-decoration: underline;
+}
+
+.info-section ul {
+  list-style: none;
+  padding: 0;
+}
+
+.info-section li {
+  padding: 0.3rem 0;
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.info-section li::before {
+  content: "•";
+  color: #667eea;
+  margin-right: 0.5rem;
+}
+
+/* ============================================================================
+ * Legend
+ * ========================================================================= */
+
+.legend {
+  position: absolute;
+  bottom: 80px;
+  left: 20px;
+  background: white;
+  padding: 1rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  z-index: 100;
+}
+
+.legend h4 {
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+  color: #333;
+  font-weight: 600;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.legend-item:last-child {
+  margin-bottom: 0;
+}
+
+.legend-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-icon.cluster {
+  background: #667eea;
+  width: 32px;
+  height: 32px;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.legend-icon.tab {
+  background: #4A90E2;
+}
+
+.legend-icon.entity {
+  background: #9C27B0;
+  width: 18px;
+  height: 18px;
+}
+
+/* ============================================================================
+ * Stats
+ * ========================================================================= */
+
+.stats {
+  position: absolute;
+  top: 100px;
+  left: 20px;
+  background: white;
+  padding: 1rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  z-index: 100;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #667eea;
+}
+
+/* ============================================================================
+ * Scrollbar Styling
+ * ========================================================================= */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f0f0f0;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #999;
+}

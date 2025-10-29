@@ -110,3 +110,54 @@ class HealthResponse(BaseModel):
     status: str
     version: str = "0.1.0"
     timestamp: str
+
+
+# ============================================================================
+# Graph Visualization Models
+# ============================================================================
+
+
+class GraphNodeData(BaseModel):
+    """Data payload for a graph node."""
+
+    id: str
+    type: str  # "cluster" or "tab"
+    label: str
+    color: Optional[str] = None
+    parent: Optional[str] = None  # For tabs, ID of parent cluster
+    url: Optional[str] = None  # For tabs
+    important: Optional[bool] = None  # For tabs
+    entities: Optional[list[str]] = None  # For tabs
+    opened_at: Optional[str] = None  # For tabs
+    tab_count: Optional[int] = None  # For clusters
+    shared_entities: Optional[list[str]] = None  # For clusters
+
+
+class GraphNode(BaseModel):
+    """Node in the graph visualization."""
+
+    data: GraphNodeData
+
+
+class GraphEdgeData(BaseModel):
+    """Data payload for a graph edge."""
+
+    id: str
+    source: str
+    target: str
+    type: str  # "contains" for cluster->tab
+
+
+class GraphEdge(BaseModel):
+    """Edge in the graph visualization."""
+
+    data: GraphEdgeData
+
+
+class GraphVisualizationResponse(BaseModel):
+    """Response model for /api/graph/visualization endpoint."""
+
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    timestamp: str
+    metadata: dict = Field(default_factory=dict)

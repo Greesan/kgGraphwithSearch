@@ -1,217 +1,99 @@
 # TabGraph
 
-**AI-Powered Tab Manager with Temporal Knowledge Graph**
+AI-powered browser extension that automatically organizes tabs into semantic groups using knowledge graphs and web APIs.
 
-Automatically organize browser tabs using AI clustering, build a personal knowledge graph, and get proactive content recommendations powered by You.com's APIs.
+## Quick Start
 
----
+**1. Backend Setup**
+```bash
+cd kgGraphwithSearch
+uv sync
+cp .env.example .env  # Add OPENAI_API_KEY and YOU_API_KEY
+uv run python -m kg_graph_search.server.app
+```
 
-## Overview
+**2. Load Extension**
+1. Open `chrome://extensions` in any Chromium browser
+2. Enable "Developer mode"
+3. Click "Load unpacked" → select `extension/` directory
+4. Extension icon appears in toolbar
 
-TabGraph is a Chromium browser extension that solves tab overload for researchers, learners, and knowledge workers by:
+**3. Start Using**
+- Open 10+ tabs on different topics
+- Extension auto-groups tabs every 5 minutes (or click refresh in popup)
+- Press `Ctrl+Shift+I` (Mac: `Cmd+Shift+I`) to mark tabs as important for deep analysis
 
-1. **Auto-organizing tabs** into semantic groups using Chrome's Tab Groups API
-2. **Building a temporal knowledge graph** that tracks entities and relationships over time
-3. **Recommending related content** you haven't seen using You.com Search/News APIs
-4. **Visualizing connections** between tabs in an interactive graph
+## Features
 
----
+- **Automatic Tab Grouping** - Clusters tabs by semantic similarity every 5 minutes
+- **Chrome Tab Groups Integration** - Creates native Chrome tab groups with names and colors
+- **Keyboard Shortcut** - `Ctrl+Shift+I` marks tab as important for deep content analysis
+- **Two-Tier Analysis** - Fast metadata extraction for all tabs, deep AI analysis for important ones
+- **Knowledge Graph** - Tracks entities and relationships (Neo4j or SQLite)
+- **Content Recommendations** - Suggests related content via You.com APIs
+- **Privacy-First** - Excludes chrome:// and extension pages, runs locally
 
-## Key Features
+## How It Works
 
-### 🗂️ Smart Tab Grouping
-- Monitors tabs every 5 minutes
-- Clusters by topic using entity similarity
-- Creates Chrome tab groups automatically
-- **Settings:** Respect existing groups OR reorganize all tabs
+```
+Browser Tabs → Extension → Backend (localhost:8000)
+            → Tab Analysis + Clustering
+            → Returns Groups
+            → Creates Chrome Tab Groups
+```
 
-### 🎯 Two-Tier Analysis
-- **All tabs:** Fast metadata extraction (URL + title)
-- **Important tabs:** Deep analysis via You.com Express API + OpenAI
-- **Keyboard shortcut:** `Ctrl+Shift+I` (Mac: `Cmd+Shift+I`) to mark important
-
-### 📊 Interactive Knowledge Graph
-- **Cytoscape.js visualization** showing tab relationships
-- **Color-coded nodes:** Regular tabs (blue) vs Important tabs (gold)
-- **Context menus:** Close tabs, move between groups, view recommendations
-- **Click cluster** to see recommended content for that topic
-
-### 💡 Smart Recommendations
-- You.com Search API: Related content you haven't seen
-- You.com News API: Breaking news on your research topics
-- **One-click:** Open recommendations directly in relevant tab groups
-
-### ⏱️ Current Session Tracking
-- Track knowledge graph growth in current session
-- See entity discovery as you research
-- Alerts for breaking news on entities in your active tabs
-- **Future:** Historical archive with Neo4j (past 5 days, advanced temporal queries)
-
----
+**Important Tab Flow:**
+```
+Ctrl+Shift+I → Extract content → Backend enrichment
+            → Store in knowledge graph
+            → Enhanced clustering with entity data
+```
 
 ## Tech Stack
 
-**Backend:**
-- FastAPI (Python)
-- SQLite (current session knowledge graph)
-- You.com APIs (Express, Search, News)
-- OpenAI GPT-4o-mini (entity structuring)
-- Neo4j (future: historical archive with 5-day retention)
-
-**Extension:**
-- Chromium Manifest V3
-- Chrome Tab Groups API
-- Cytoscape.js (graph visualization)
-- Vanilla JS (popup, settings)
-
----
+**Extension:** Manifest V3, Chrome Tab Groups API, Vanilla JS
+**Backend:** FastAPI, OpenAI GPT-4o-mini
+**Graph:** Neo4j or SQLite
+**APIs:** You.com (Search, News, Express)
 
 ## Project Structure
 
 ```
-kg-graph-search/
-├── src/
-│   └── kg_graph_search/
-│       ├── server/              # FastAPI backend
-│       ├── agents/              # Tab analyzer, clusterer, recommender
-│       ├── graph/               # Knowledge graph (SQLite)
-│       │   ├── base.py          # Abstract interface
-│       │   ├── models.py        # Pydantic models
-│       │   ├── database.py      # SQLite implementation
-│       │   └── neo4j_store.py   # Neo4j implementation
-│       ├── search/              # You.com API clients
-│       └── config.py            # Configuration
-├── extension/                   # Browser extension
-│   ├── manifest.json
-│   ├── background.js            # Tab monitoring
-│   ├── content.js               # Content extraction
-│   ├── popup/                   # Popup UI
-│   ├── graph/                   # Graph visualization
-│   └── settings/                # Settings page
-├── examples/                    # Example scripts
-├── PRD.md                       # Full product requirements
-└── pyproject.toml              # Dependencies
+extension/
+├── manifest.json          # Extension config
+├── background.js          # Tab monitoring & clustering
+├── content.js             # Content extraction
+└── popup/                 # Popup UI
+
+src/kg_graph_search/
+├── server/                # FastAPI backend
+├── agents/                # Tab analyzer, clusterer
+├── graph/                 # Knowledge graph (SQLite)
+└── search/                # You.com API clients
 ```
 
----
+## Troubleshooting
 
-## Setup
+**Extension shows "Unable to connect to backend"**
+- Ensure backend is running: `uv run python -m kg_graph_search.server.app`
+- Check `http://localhost:8000` is accessible
 
-### Prerequisites
+**Tabs not grouping**
+- Click refresh button in popup to force sync
+- Need 10+ tabs for optimal clustering
+- Check service worker console: `chrome://extensions` → Details → Service Worker
 
-- Python 3.12+
-- [uv](https://github.com/astral-sh/uv) package manager
-- Chromium-based browser (Chrome, Comet, Brave, Edge, Arc)
+**Keyboard shortcut not working**
+- Verify at `chrome://extensions/shortcuts`
+- Check for conflicts with other extensions
 
-### Installation
+**Content not extracting from important tabs**
+- Cannot access chrome:// or other extension pages
+- Check page console (F12) for content script errors
 
-**1. Backend Setup**
+## Configuration
 
-```bash
-# Clone and navigate to project
-cd kgGraphwithSearch
-
-# Install dependencies
-uv sync
-
-# Optional: Install Neo4j support (for future historical archive feature)
-# uv sync --extra neo4j
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your API keys:
-# - OPENAI_API_KEY
-# - YOU_API_KEY
-```
-
-**2. Start Backend Server**
-
-```bash
-uv run python examples/start_server.py
-
-# Server runs at http://localhost:8000
-```
-
-**3. Load Browser Extension**
-
-```bash
-# In Chromium browser:
-1. Go to chrome://extensions
-2. Enable "Developer mode"
-3. Click "Load unpacked"
-4. Select the extension/ directory
-5. Extension icon appears in toolbar
-```
-
----
-
-## Usage
-
-### Basic Workflow
-
-1. **Open research tabs** (10+) on various topics
-2. **Extension auto-analyzes** and creates tab groups every 5 minutes
-3. **Mark important tabs** with `Ctrl+Shift+I` for deep analysis
-4. **Click extension icon** to see clusters and recommendations
-5. **View full graph** to explore connections between tabs
-6. **Click recommendations** to open in relevant tab groups
-
-### Configuration
-
-**Settings (click ⚙️ in popup):**
-- **Tab Grouping Mode:**
-  - Respect Mode: Keep existing groups, add new ones
-  - Reorganize Mode: AI reorganizes all tabs
-- **Analysis Frequency:** How often to check tabs (default: 5 min)
-- **Privacy:** Exclude sensitive domains (banking, social media)
-
----
-
-## API Endpoints
-
-### Backend
-
-- `POST /api/tabs/ingest` - Receive tabs from extension
-- `GET /api/tabs/clusters` - Get clustered tabs
-- `GET /api/recommendations` - Get content suggestions
-- `GET /api/insights` - Get temporal stats
-- `POST /api/tabs/mark-important` - Mark tab for deep analysis
-
-### You.com Integration
-
-- **Express API:** Entity extraction from important tabs
-- **Search API:** Find related content
-- **News API:** Breaking news on research topics
-
----
-
-## Development
-
-### Implementation Phases
-
-**Phase 1: MVP (12-16 hours)**
-- Basic tab grouping
-- Metadata-only analysis
-- Simple recommendations
-- Keyboard shortcut
-
-**Phase 2: Enhanced (16-20 hours)**
-- Interactive graph visualization
-- Color-coded important tabs
-- You.com Express API integration
-- Recommendation panel
-
-**Phase 3: Full (20-28 hours)**
-- Context menus
-- Temporal insights
-- News alerts
-- Drag-and-drop
-
-See [PRD.md](./PRD.md) for complete specifications.
-
----
-
-## Environment Variables
+Create `.env` file with:
 
 ```env
 # Required
@@ -220,62 +102,26 @@ YOU_API_KEY=your_key_here
 
 # Optional
 OPENAI_LLM_MODEL=gpt-4o-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+USE_NEO4J=false
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
 DB_PATH=./data/knowledge_graph.db
-SERVER_PORT=8000
-TAB_MONITOR_INTERVAL_MINUTES=5
-
-# Neo4j (future feature - historical archive)
-# NEO4J_URI=bolt://localhost:7687
-# NEO4J_PASSWORD=your_password
 ```
 
----
+## API Documentation
 
-## Architecture
+Backend runs at `http://localhost:8000`
+Interactive API docs: `http://localhost:8000/docs`
 
-```
-┌──────────────────────────────────┐
-│  Browser Extension               │
-│  • Tab monitoring                │
-│  • Tab Groups API                │
-│  • Cytoscape graph               │
-└──────────┬───────────────────────┘
-           │ HTTP (localhost:8000)
-           ▼
-┌──────────────────────────────────┐
-│  FastAPI Backend                 │
-│  • Tab analyzer                  │
-│  • Clustering engine             │
-│  • Recommendation engine         │
-│  • SQLite (current session)     │
-└──────────┬───────────────────────┘
-           │ API Calls
-           ▼
-┌──────────────────────────────────┐
-│  External APIs                   │
-│  • You.com (Express/Search/News) │
-│  • OpenAI (GPT-4o-mini)          │
-└──────────────────────────────────┘
-```
+Key endpoints:
+- `POST /api/tabs/ingest` - Send tabs for clustering
+- `GET /api/tabs/clusters` - Get tab groups
+- `GET /api/recommendations` - Get content suggestions
 
----
-
-## Contributing
-
-See [PRD.md](./PRD.md) for detailed technical specifications and implementation guidelines.
-
----
+See [PRD.md](./PRD.md) for complete specifications.
 
 ## License
 
-MIT License
-
----
-
-## Resources
-
-- [Chrome Tab Groups API](https://developer.chrome.com/docs/extensions/reference/tabGroups/)
-- [You.com API Docs](https://documentation.you.com/)
-- [OpenAI Cookbook - Temporal Agents](https://cookbook.openai.com/examples/partners/temporal_agents_with_knowledge_graphs/)
-- [Cytoscape.js](https://js.cytoscape.org/)
-- [FastAPI](https://fastapi.tiangolo.com/)
+MIT

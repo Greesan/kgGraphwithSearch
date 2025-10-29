@@ -17,6 +17,13 @@ class Entity(BaseModel):
     description: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
+    # Enrichment fields (from You.com API)
+    web_description: Optional[str] = None
+    related_concepts: list[str] = Field(default_factory=list)
+    source_url: Optional[str] = None
+    is_enriched: bool = False
+    enriched_at: Optional[datetime] = None
+
 
 class TemporalValidityRange(BaseModel):
     """Represents the temporal validity of a relationship or fact."""

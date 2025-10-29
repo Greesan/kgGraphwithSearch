@@ -51,6 +51,15 @@ class Neo4jGraphStore(GraphStore):
                 """
             )
 
+            # Constraint: unique tab ID
+            session.run(
+                """
+                CREATE CONSTRAINT tab_unique IF NOT EXISTS
+                FOR (t:Tab)
+                REQUIRE t.id IS UNIQUE
+                """
+            )
+
             # Index on entity name for faster lookups
             session.run(
                 """
@@ -64,6 +73,30 @@ class Neo4jGraphStore(GraphStore):
                 """
                 CREATE INDEX entity_type_idx IF NOT EXISTS
                 FOR (e:Entity) ON (e.type)
+                """
+            )
+
+            # Index on tab URL
+            session.run(
+                """
+                CREATE INDEX tab_url_idx IF NOT EXISTS
+                FOR (t:Tab) ON (t.url)
+                """
+            )
+
+            # Index on tab opened_at for temporal queries
+            session.run(
+                """
+                CREATE INDEX tab_opened_at_idx IF NOT EXISTS
+                FOR (t:Tab) ON (t.opened_at)
+                """
+            )
+
+            # Index on tab is_active
+            session.run(
+                """
+                CREATE INDEX tab_is_active_idx IF NOT EXISTS
+                FOR (t:Tab) ON (t.is_active)
                 """
             )
 
@@ -83,13 +116,23 @@ class Neo4jGraphStore(GraphStore):
                 MERGE (e:Entity {name: $name, type: $type})
                 ON CREATE SET
                     e.description = $description,
-                    e.created_at = datetime($created_at)
+                    e.created_at = datetime($created_at),
+                    e.web_description = $web_description,
+                    e.related_concepts = $related_concepts,
+                    e.source_url = $source_url,
+                    e.is_enriched = $is_enriched,
+                    e.enriched_at = $enriched_at
                 RETURN id(e) as entity_id
                 """,
                 name=entity.name,
                 type=entity.entity_type,
                 description=entity.description,
                 created_at=entity.created_at.isoformat(),
+                web_description=entity.web_description,
+                related_concepts=entity.related_concepts,
+                source_url=entity.source_url,
+                is_enriched=entity.is_enriched,
+                enriched_at=entity.enriched_at.isoformat() if entity.enriched_at else None,
             )
             record = result.single()
             return record["entity_id"]
@@ -105,6 +148,11 @@ class Neo4jGraphStore(GraphStore):
                        e.type as type,
                        e.description as description,
                        e.created_at as created_at,
+                       e.web_description as web_description,
+                       e.related_concepts as related_concepts,
+                       e.source_url as source_url,
+                       e.is_enriched as is_enriched,
+                       e.enriched_at as enriched_at,
                        id(e) as id
                 """,
                 entity_id=entity_id,
@@ -118,6 +166,11 @@ class Neo4jGraphStore(GraphStore):
                     entity_type=record["type"],
                     description=record["description"],
                     created_at=datetime.fromisoformat(record["created_at"]),
+                    web_description=record["web_description"],
+                    related_concepts=record["related_concepts"] or [],
+                    source_url=record["source_url"],
+                    is_enriched=bool(record["is_enriched"]) if record["is_enriched"] is not None else False,
+                    enriched_at=datetime.fromisoformat(record["enriched_at"]) if record["enriched_at"] else None,
                 )
             return None
 
@@ -134,6 +187,11 @@ class Neo4jGraphStore(GraphStore):
                            e.type as type,
                            e.description as description,
                            e.created_at as created_at,
+                           e.web_description as web_description,
+                           e.related_concepts as related_concepts,
+                           e.source_url as source_url,
+                           e.is_enriched as is_enriched,
+                           e.enriched_at as enriched_at,
                            id(e) as id
                     """,
                     name=name,
@@ -147,6 +205,11 @@ class Neo4jGraphStore(GraphStore):
                            e.type as type,
                            e.description as description,
                            e.created_at as created_at,
+                           e.web_description as web_description,
+                           e.related_concepts as related_concepts,
+                           e.source_url as source_url,
+                           e.is_enriched as is_enriched,
+                           e.enriched_at as enriched_at,
                            id(e) as id
                     LIMIT 1
                     """,
@@ -161,6 +224,11 @@ class Neo4jGraphStore(GraphStore):
                     entity_type=record["type"],
                     description=record["description"],
                     created_at=datetime.fromisoformat(record["created_at"]),
+                    web_description=record["web_description"],
+                    related_concepts=record["related_concepts"] or [],
+                    source_url=record["source_url"],
+                    is_enriched=bool(record["is_enriched"]) if record["is_enriched"] is not None else False,
+                    enriched_at=datetime.fromisoformat(record["enriched_at"]) if record["enriched_at"] else None,
                 )
             return None
 
@@ -392,6 +460,594 @@ class Neo4jGraphStore(GraphStore):
                 )
 
             return triplets
+
+    def add_tab(
+        self,
+        tab_id: int,
+        url: str,
+        title: str,
+        favicon_url: Optional[str] = None,
+        embedding: Optional[list[float]] = None,
+        window_id: Optional[int] = None,
+        group_id: Optional[int] = None,
+        opened_at: Optional[datetime] = None,
+    ) -> int:
+        """
+        Add or update a tab in the graph.
+
+        Args:
+            tab_id: Browser tab ID
+            url: Tab URL
+            title: Tab title
+            favicon_url: URL to favicon
+            embedding: Vector embedding (stored as list property)
+            window_id: Browser window ID
+            group_id: Chrome Tab Group ID
+            opened_at: When the tab was opened
+
+        Returns:
+            The tab_id
+        """
+        with self.driver.session(database=self.database) as session:
+            opened_timestamp = opened_at.isoformat() if opened_at else datetime.utcnow().isoformat()
+
+            session.run(
+                """
+                MERGE (t:Tab {id: $tab_id})
+                SET t.url = $url,
+                    t.title = $title,
+                    t.favicon_url = $favicon_url,
+                    t.embedding = $embedding,
+                    t.window_id = $window_id,
+                    t.group_id = $group_id,
+                    t.last_accessed = datetime(),
+                    t.is_active = true,
+                    t.closed_at = null
+                ON CREATE SET
+                    t.opened_at = datetime($opened_at),
+                    t.created_at = datetime()
+                """,
+                tab_id=tab_id,
+                url=url,
+                title=title,
+                favicon_url=favicon_url,
+                embedding=embedding,
+                window_id=window_id,
+                group_id=group_id,
+                opened_at=opened_timestamp,
+            )
+
+            return tab_id
+
+    def get_tab(self, tab_id: int) -> Optional[dict]:
+        """
+        Get a tab by ID.
+
+        Args:
+            tab_id: The tab ID
+
+        Returns:
+            Dictionary with tab data, or None if not found
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t:Tab {id: $tab_id})
+                RETURN t.id as id,
+                       t.url as url,
+                       t.title as title,
+                       t.favicon_url as favicon_url,
+                       t.embedding as embedding,
+                       t.opened_at as opened_at,
+                       t.closed_at as closed_at,
+                       t.created_at as created_at,
+                       t.last_accessed as last_accessed,
+                       t.window_id as window_id,
+                       t.group_id as group_id,
+                       t.is_active as is_active
+                """,
+                tab_id=tab_id,
+            )
+            record = result.single()
+
+            if not record:
+                return None
+
+            return {
+                "id": record["id"],
+                "url": record["url"],
+                "title": record["title"],
+                "favicon_url": record["favicon_url"],
+                "embedding": record["embedding"],
+                "opened_at": datetime.fromisoformat(record["opened_at"]) if record["opened_at"] else None,
+                "closed_at": datetime.fromisoformat(record["closed_at"]) if record["closed_at"] else None,
+                "created_at": datetime.fromisoformat(record["created_at"]),
+                "last_accessed": datetime.fromisoformat(record["last_accessed"]),
+                "window_id": record["window_id"],
+                "group_id": record["group_id"],
+                "is_active": record["is_active"],
+            }
+
+    def link_tab_to_entity(self, tab_id: int, entity_id: int) -> None:
+        """
+        Create or update a relationship between a tab and an entity.
+
+        Args:
+            tab_id: The tab ID
+            entity_id: The entity ID
+        """
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MATCH (t:Tab {id: $tab_id}), (e:Entity)
+                WHERE id(e) = $entity_id
+                MERGE (t)-[r:MENTIONS]->(e)
+                ON CREATE SET
+                    r.first_seen = datetime(),
+                    r.last_seen = datetime()
+                ON MATCH SET
+                    r.last_seen = datetime()
+                """,
+                tab_id=tab_id,
+                entity_id=entity_id,
+            )
+
+    def close_tab(self, tab_id: int) -> bool:
+        """
+        Mark a tab as closed.
+
+        Args:
+            tab_id: The tab ID to close
+
+        Returns:
+            True if tab was closed, False if not found
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t:Tab {id: $tab_id, is_active: true})
+                SET t.closed_at = datetime(),
+                    t.is_active = false
+                RETURN t.id as id
+                """,
+                tab_id=tab_id,
+            )
+            return result.single() is not None
+
+    def get_entities_for_tab(self, tab_id: int) -> list[Entity]:
+        """
+        Get all entities associated with a tab.
+
+        Args:
+            tab_id: The tab ID
+
+        Returns:
+            List of entities
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t:Tab {id: $tab_id})-[:MENTIONS]->(e:Entity)
+                RETURN e.name as name,
+                       e.type as type,
+                       e.description as description,
+                       e.created_at as created_at,
+                       id(e) as id
+                """,
+                tab_id=tab_id,
+            )
+
+            entities = []
+            for record in result:
+                entities.append(
+                    Entity(
+                        id=record["id"],
+                        name=record["name"],
+                        entity_type=record["type"],
+                        description=record["description"],
+                        created_at=datetime.fromisoformat(record["created_at"]),
+                    )
+                )
+
+            return entities
+
+    def get_tabs_for_entity(self, entity_id: int) -> list[dict]:
+        """
+        Get all tabs that mention a specific entity.
+
+        Args:
+            entity_id: The entity ID
+
+        Returns:
+            List of tab dictionaries
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t:Tab)-[:MENTIONS]->(e:Entity)
+                WHERE id(e) = $entity_id
+                RETURN t.id as id,
+                       t.url as url,
+                       t.title as title,
+                       t.favicon_url as favicon_url,
+                       t.embedding as embedding,
+                       t.opened_at as opened_at,
+                       t.closed_at as closed_at,
+                       t.created_at as created_at,
+                       t.last_accessed as last_accessed,
+                       t.window_id as window_id,
+                       t.group_id as group_id,
+                       t.is_active as is_active
+                """,
+                entity_id=entity_id,
+            )
+
+            tabs = []
+            for record in result:
+                tabs.append({
+                    "id": record["id"],
+                    "url": record["url"],
+                    "title": record["title"],
+                    "favicon_url": record["favicon_url"],
+                    "embedding": record["embedding"],
+                    "opened_at": datetime.fromisoformat(record["opened_at"]) if record["opened_at"] else None,
+                    "closed_at": datetime.fromisoformat(record["closed_at"]) if record["closed_at"] else None,
+                    "created_at": datetime.fromisoformat(record["created_at"]),
+                    "last_accessed": datetime.fromisoformat(record["last_accessed"]),
+                    "window_id": record["window_id"],
+                    "group_id": record["group_id"],
+                    "is_active": record["is_active"],
+                })
+
+            return tabs
+
+    def find_tabs_with_shared_entities(
+        self, tab_id: int, min_shared: int = 1, limit: int = 50
+    ) -> list[tuple[dict, int]]:
+        """
+        Find tabs that share entities with the given tab.
+
+        Args:
+            tab_id: The tab ID to find related tabs for
+            min_shared: Minimum number of shared entities
+            limit: Maximum number of results
+
+        Returns:
+            List of tuples: (tab_dict, shared_entity_count)
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t1:Tab {id: $tab_id})-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(t2:Tab)
+                WHERE t1 <> t2
+                WITH t2, COUNT(DISTINCT e) as shared_count
+                WHERE shared_count >= $min_shared
+                RETURN t2.id as id,
+                       t2.url as url,
+                       t2.title as title,
+                       t2.favicon_url as favicon_url,
+                       t2.embedding as embedding,
+                       t2.opened_at as opened_at,
+                       t2.closed_at as closed_at,
+                       t2.created_at as created_at,
+                       t2.last_accessed as last_accessed,
+                       t2.window_id as window_id,
+                       t2.group_id as group_id,
+                       t2.is_active as is_active,
+                       shared_count
+                ORDER BY shared_count DESC
+                LIMIT $limit
+                """,
+                tab_id=tab_id,
+                min_shared=min_shared,
+                limit=limit,
+            )
+
+            results = []
+            for record in result:
+                tab_dict = {
+                    "id": record["id"],
+                    "url": record["url"],
+                    "title": record["title"],
+                    "favicon_url": record["favicon_url"],
+                    "embedding": record["embedding"],
+                    "opened_at": datetime.fromisoformat(record["opened_at"]) if record["opened_at"] else None,
+                    "closed_at": datetime.fromisoformat(record["closed_at"]) if record["closed_at"] else None,
+                    "created_at": datetime.fromisoformat(record["created_at"]),
+                    "last_accessed": datetime.fromisoformat(record["last_accessed"]),
+                    "window_id": record["window_id"],
+                    "group_id": record["group_id"],
+                    "is_active": record["is_active"],
+                }
+                results.append((tab_dict, record["shared_count"]))
+
+            return results
+
+    def update_tab_relationship(
+        self,
+        tab_id_1: int,
+        tab_id_2: int,
+        shared_entities: list[str],
+        relationship_strength: float,
+    ) -> None:
+        """
+        Create or update a relationship between two tabs.
+
+        Args:
+            tab_id_1: First tab ID
+            tab_id_2: Second tab ID
+            shared_entities: List of entity names shared between tabs
+            relationship_strength: Strength score (0-1)
+        """
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MATCH (t1:Tab {id: $tab_id_1}), (t2:Tab {id: $tab_id_2})
+                MERGE (t1)-[r:RELATED_TO]-(t2)
+                SET r.shared_entities = $shared_entities,
+                    r.shared_entity_count = size($shared_entities),
+                    r.relationship_strength = $relationship_strength,
+                    r.last_updated = datetime()
+                ON CREATE SET
+                    r.first_connected = datetime()
+                """,
+                tab_id_1=tab_id_1,
+                tab_id_2=tab_id_2,
+                shared_entities=shared_entities,
+                relationship_strength=relationship_strength,
+            )
+
+    def get_active_tabs(self) -> list[dict]:
+        """
+        Get all currently active (open) tabs.
+
+        Returns:
+            List of active tab dictionaries
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t:Tab {is_active: true})
+                RETURN t.id as id,
+                       t.url as url,
+                       t.title as title,
+                       t.favicon_url as favicon_url,
+                       t.embedding as embedding,
+                       t.opened_at as opened_at,
+                       t.closed_at as closed_at,
+                       t.created_at as created_at,
+                       t.last_accessed as last_accessed,
+                       t.window_id as window_id,
+                       t.group_id as group_id,
+                       t.is_active as is_active
+                ORDER BY t.last_accessed DESC
+                """
+            )
+
+            tabs = []
+            for record in result:
+                tabs.append({
+                    "id": record["id"],
+                    "url": record["url"],
+                    "title": record["title"],
+                    "favicon_url": record["favicon_url"],
+                    "embedding": record["embedding"],
+                    "opened_at": datetime.fromisoformat(record["opened_at"]) if record["opened_at"] else None,
+                    "closed_at": datetime.fromisoformat(record["closed_at"]) if record["closed_at"] else None,
+                    "created_at": datetime.fromisoformat(record["created_at"]),
+                    "last_accessed": datetime.fromisoformat(record["last_accessed"]),
+                    "window_id": record["window_id"],
+                    "group_id": record["group_id"],
+                    "is_active": record["is_active"],
+                })
+
+            return tabs
+
+    def get_tabs_in_time_range(
+        self, start_time: datetime, end_time: datetime
+    ) -> list[dict]:
+        """
+        Get tabs that were active during a specific time range.
+
+        Args:
+            start_time: Start of time range
+            end_time: End of time range
+
+        Returns:
+            List of tab dictionaries
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (t:Tab)
+                WHERE datetime(t.opened_at) <= datetime($end_time)
+                  AND (t.closed_at IS NULL OR datetime(t.closed_at) >= datetime($start_time))
+                RETURN t.id as id,
+                       t.url as url,
+                       t.title as title,
+                       t.favicon_url as favicon_url,
+                       t.embedding as embedding,
+                       t.opened_at as opened_at,
+                       t.closed_at as closed_at,
+                       t.created_at as created_at,
+                       t.last_accessed as last_accessed,
+                       t.window_id as window_id,
+                       t.group_id as group_id,
+                       t.is_active as is_active
+                ORDER BY t.opened_at DESC
+                """,
+                start_time=start_time.isoformat(),
+                end_time=end_time.isoformat(),
+            )
+
+            tabs = []
+            for record in result:
+                tabs.append({
+                    "id": record["id"],
+                    "url": record["url"],
+                    "title": record["title"],
+                    "favicon_url": record["favicon_url"],
+                    "embedding": record["embedding"],
+                    "opened_at": datetime.fromisoformat(record["opened_at"]) if record["opened_at"] else None,
+                    "closed_at": datetime.fromisoformat(record["closed_at"]) if record["closed_at"] else None,
+                    "created_at": datetime.fromisoformat(record["created_at"]),
+                    "last_accessed": datetime.fromisoformat(record["last_accessed"]),
+                    "window_id": record["window_id"],
+                    "group_id": record["group_id"],
+                    "is_active": record["is_active"],
+                })
+
+            return tabs
+
+    def update_entity_enrichment(
+        self,
+        entity_id: int,
+        web_description: str,
+        entity_type: str,
+        related_concepts: list[str],
+        source_url: str,
+    ) -> bool:
+        """
+        Update an entity with enrichment data from You.com.
+
+        Args:
+            entity_id: Entity ID to update
+            web_description: Description from web search
+            entity_type: Classified entity type
+            related_concepts: List of related concept names
+            source_url: Source URL for the enrichment
+
+        Returns:
+            True if updated successfully
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (e:Entity)
+                WHERE id(e) = $entity_id
+                SET e.web_description = $web_description,
+                    e.type = $entity_type,
+                    e.related_concepts = $related_concepts,
+                    e.source_url = $source_url,
+                    e.is_enriched = true,
+                    e.enriched_at = datetime($enriched_at)
+                RETURN count(e) as updated_count
+                """,
+                entity_id=entity_id,
+                web_description=web_description,
+                entity_type=entity_type,
+                related_concepts=related_concepts,
+                source_url=source_url,
+                enriched_at=datetime.now().isoformat(),
+            )
+            record = result.single()
+            return record["updated_count"] > 0
+
+    def needs_enrichment(self, entity_id: int, cache_ttl_days: int = 7) -> bool:
+        """
+        Check if an entity needs enrichment or re-enrichment.
+
+        Args:
+            entity_id: Entity ID to check
+            cache_ttl_days: Cache TTL in days (default: 7)
+
+        Returns:
+            True if entity needs enrichment
+        """
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (e:Entity)
+                WHERE id(e) = $entity_id
+                RETURN e.is_enriched as is_enriched,
+                       e.enriched_at as enriched_at
+                """,
+                entity_id=entity_id,
+            )
+            record = result.single()
+
+            if not record:
+                return False
+
+            # Not enriched yet
+            if not record["is_enriched"]:
+                return True
+
+            # Check if cache has expired
+            if record["enriched_at"]:
+                enriched_at = datetime.fromisoformat(record["enriched_at"])
+                from datetime import timedelta
+
+                cache_expiry = enriched_at + timedelta(days=cache_ttl_days)
+                if datetime.now() > cache_expiry:
+                    return True
+
+            return False
+
+    def get_entities_needing_enrichment(
+        self, limit: int = 10, cache_ttl_days: int = 7
+    ) -> list[Entity]:
+        """
+        Get entities that need enrichment.
+
+        Args:
+            limit: Maximum number of entities to return
+            cache_ttl_days: Cache TTL in days
+
+        Returns:
+            List of entities needing enrichment
+        """
+        with self.driver.session(database=self.database) as session:
+            # Calculate cache expiry timestamp
+            from datetime import timedelta
+
+            cache_expiry = datetime.now() - timedelta(days=cache_ttl_days)
+
+            result = session.run(
+                """
+                MATCH (e:Entity)
+                WHERE e.is_enriched IS NULL
+                   OR e.is_enriched = false
+                   OR e.enriched_at IS NULL
+                   OR datetime(e.enriched_at) < datetime($cache_expiry)
+                RETURN e.name as name,
+                       e.type as type,
+                       e.description as description,
+                       e.created_at as created_at,
+                       e.web_description as web_description,
+                       e.related_concepts as related_concepts,
+                       e.source_url as source_url,
+                       e.is_enriched as is_enriched,
+                       e.enriched_at as enriched_at,
+                       id(e) as id
+                LIMIT $limit
+                """,
+                cache_expiry=cache_expiry.isoformat(),
+                limit=limit,
+            )
+
+            entities = []
+            for record in result:
+                entities.append(
+                    Entity(
+                        id=record["id"],
+                        name=record["name"],
+                        entity_type=record["type"],
+                        description=record["description"],
+                        created_at=datetime.fromisoformat(record["created_at"]),
+                        web_description=record["web_description"],
+                        related_concepts=record["related_concepts"] or [],
+                        source_url=record["source_url"],
+                        is_enriched=bool(record["is_enriched"])
+                        if record["is_enriched"] is not None
+                        else False,
+                        enriched_at=datetime.fromisoformat(record["enriched_at"])
+                        if record["enriched_at"]
+                        else None,
+                    )
+                )
+
+            return entities
 
     def close(self):
         """Close the Neo4j driver connection."""

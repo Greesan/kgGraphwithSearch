@@ -20,6 +20,11 @@ from kg_graph_search.agents.models import (
     ClusterColor,
     ClusteringResult,
 )
+from kg_graph_search.graph.database import KnowledgeGraphDB
+from kg_graph_search.graph.models import Entity
+from kg_graph_search.agents.entity_extractor import EntityExtractor
+from kg_graph_search.agents.entity_enricher import EntityEnricher
+from kg_graph_search.search.you_client import YouAPIClient
 
 
 class TabClusterer:
@@ -51,6 +56,8 @@ class TabClusterer:
         similarity_threshold: float = 0.75,
         rename_threshold: int = 3,
         openai_api_key: Optional[str] = None,
+        graph_db: Optional[KnowledgeGraphDB] = None,
+        entity_weight: float = 0.5,
     ):
         """
         Initialize the TabClusterer.
@@ -61,9 +68,14 @@ class TabClusterer:
             rename_threshold: Number of tabs added before triggering cluster rename.
                 Default: 3
             openai_api_key: OpenAI API key. If not provided, loaded from config.
+            graph_db: Knowledge graph database for storing tab-entity relationships.
+                If None, clustering will use embeddings only.
+            entity_weight: Weight for entity overlap in hybrid scoring (0-1).
+                0 = embeddings only, 1 = entities only. Default: 0.5 (equal weight)
         """
         self.similarity_threshold = similarity_threshold
         self.rename_threshold = rename_threshold
+        self.entity_weight = entity_weight
 
         # Load configuration
         settings = get_settings()
@@ -76,6 +88,18 @@ class TabClusterer:
         self.clusters: list[TabCluster] = []
         self.color_pool: list[ClusterColor] = list(ClusterColor)
         self._next_color_index = 0
+
+        # Knowledge graph integration
+        self.graph_db = graph_db
+
+        # Entity extraction
+        self.entity_extractor = EntityExtractor(self.openai_client, self.llm_model)
+
+        # Entity enrichment (optional - requires You.com API key)
+        self.entity_enricher = None
+        if settings.you_api_key:
+            you_client = YouAPIClient(api_key=settings.you_api_key)
+            self.entity_enricher = EntityEnricher(you_client, cache_ttl_days=7)
 
     def _get_next_color(self) -> ClusterColor:
         """Get the next available color for a new cluster (round-robin)."""
@@ -107,6 +131,64 @@ class TabClusterer:
             return 0.0
 
         return float(np.dot(vec1, vec2) / (norm1 * norm2))
+
+    def _entity_overlap_score(self, entities1: list[str], entities2: list[str]) -> float:
+        """
+        Calculate Jaccard similarity between two entity lists.
+
+        Args:
+            entities1: First list of entity names
+            entities2: Second list of entity names
+
+        Returns:
+            Jaccard similarity score (0-1, where 1 means identical sets)
+        """
+        if not entities1 or not entities2:
+            return 0.0
+
+        set1 = set(entities1)
+        set2 = set(entities2)
+
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+
+        if union == 0:
+            return 0.0
+
+        return float(intersection / union)
+
+    def _hybrid_similarity(
+        self,
+        embedding1: list[float],
+        embedding2: list[float],
+        entities1: list[str],
+        entities2: list[str],
+    ) -> float:
+        """
+        Calculate hybrid similarity combining embeddings and entity overlap.
+
+        Args:
+            embedding1: First embedding vector
+            embedding2: Second embedding vector
+            entities1: First list of entities
+            entities2: Second list of entities
+
+        Returns:
+            Hybrid similarity score (0-1)
+        """
+        # Calculate embedding similarity
+        embedding_sim = self._cosine_similarity(embedding1, embedding2)
+
+        # Calculate entity overlap
+        entity_sim = self._entity_overlap_score(entities1, entities2)
+
+        # Weighted combination
+        hybrid_score = (
+            (1 - self.entity_weight) * embedding_sim +
+            self.entity_weight * entity_sim
+        )
+
+        return hybrid_score
 
     def generate_embedding(self, text: str) -> list[float]:
         """
@@ -178,7 +260,7 @@ class TabClusterer:
         entities = cluster.shared_entities[:10]  # Top 10 shared entities
 
         # Build prompt
-        prompt = f"""You are naming a browser tab group. Generate a concise, descriptive name (2-4 words) that captures the common theme.
+        prompt = f"""You are naming a browser tab group. Generate a broad, general category name (1-3 words) that captures the overarching theme.
 
 Tab titles in this group:
 {chr(10).join(f"- {title}" for title in tab_titles)}
@@ -187,16 +269,18 @@ Common entities:
 {chr(10).join(f"- {entity}" for entity in entities) if entities else "None"}
 
 Rules:
-- Use 2-4 words maximum
-- Be specific but concise
-- Focus on the main topic or purpose
+- Use 1-3 words maximum
+- Be GENERAL and BROAD - think high-level categories
+- Prefer single-word or two-word labels when possible
+- Avoid overly specific details
 - Use title case
 
 Examples:
-- "Graph Database Research"
-- "React Component Design"
-- "Machine Learning Papers"
-- "API Documentation"
+- "Development" (not "React Development")
+- "Databases" (not "Graph Database Research")
+- "Machine Learning" (not "ML Papers on Transformers")
+- "Documentation" (not "API Documentation")
+- "Research" (not "Academic Paper Review")
 
 Generate the name (no quotes, just the name):"""
 
@@ -218,9 +302,128 @@ Generate the name (no quotes, just the name):"""
             print(f"Warning: Failed to generate cluster name via LLM: {e}")
             return f"Cluster {cluster.id[:8]}"
 
+    def _store_tab_in_graph(self, tab: Tab) -> None:
+        """
+        Store tab and its entities in the knowledge graph.
+
+        Also computes and stores relationships to other tabs.
+
+        Args:
+            tab: The tab to store
+        """
+        if not self.graph_db:
+            return
+
+        # Store tab in database
+        self.graph_db.add_tab(
+            tab_id=tab.id,
+            url=tab.url,
+            title=tab.title,
+            favicon_url=tab.favicon_url,
+            embedding=tab.embedding,
+            window_id=tab.window_id,
+            group_id=tab.group_id,
+        )
+
+        # Store entities and link to tab
+        for entity_name in tab.entities:
+            # Create or get entity
+            entity = self.graph_db.find_entity_by_name(entity_name)
+            if not entity:
+                entity = Entity(
+                    name=entity_name,
+                    entity_type="Concept",  # Default type
+                    description=None,
+                    created_at=datetime.now(UTC),
+                )
+                entity_id = self.graph_db.add_entity(entity)
+
+                # Enrich new entity if enricher is available
+                if self.entity_enricher:
+                    self._enrich_entity_async(entity_id, entity_name)
+            else:
+                entity_id = entity.id
+
+                # Check if existing entity needs re-enrichment
+                if self.entity_enricher and self.graph_db.needs_enrichment(entity_id):
+                    self._enrich_entity_async(entity_id, entity_name)
+
+            # Link tab to entity
+            self.graph_db.link_tab_to_entity(tab.id, entity_id)
+
+        # Compute and store relationships to other tabs
+        if tab.entities:  # Only compute if tab has entities
+            self.graph_db.compute_and_store_tab_relationships(tab.id, min_shared=1)
+
+    def _enrich_entity_async(self, entity_id: int, entity_name: str) -> None:
+        """
+        Enrich an entity with web data asynchronously.
+
+        This method enriches entities in the background without blocking
+        tab processing. In production, this should be done with proper
+        async/queue infrastructure.
+
+        Args:
+            entity_id: ID of the entity to enrich
+            entity_name: Name of the entity
+        """
+        if not self.entity_enricher or not self.graph_db:
+            return
+
+        try:
+            # Get enrichment data from You.com
+            enrichment_data = self.entity_enricher.enrich_entity(entity_name)
+
+            if enrichment_data["is_enriched"]:
+                # Update entity in database
+                self.graph_db.update_entity_enrichment(
+                    entity_id=entity_id,
+                    web_description=enrichment_data["description"],
+                    entity_type=enrichment_data["type"],
+                    related_concepts=enrichment_data["related_concepts"],
+                    source_url=enrichment_data["source_url"],
+                )
+        except Exception as e:
+            # Silently fail enrichment - don't block tab processing
+            print(f"Failed to enrich entity '{entity_name}': {e}")
+
+    def _update_cluster_shared_entities(self, cluster: TabCluster) -> None:
+        """
+        Update the shared_entities list for a cluster based on current tabs.
+
+        Finds entities that appear in multiple tabs within the cluster.
+
+        Args:
+            cluster: The cluster to update
+        """
+        if not cluster.tabs:
+            cluster.shared_entities = []
+            return
+
+        # Count entity occurrences across all tabs
+        entity_counts: dict[str, int] = {}
+        for tab in cluster.tabs:
+            for entity in tab.entities:
+                entity_counts[entity] = entity_counts.get(entity, 0) + 1
+
+        # Include entities that appear in at least 2 tabs, or if cluster has only 1 tab, all entities
+        min_occurrences = 2 if len(cluster.tabs) > 1 else 1
+        shared = [
+            entity for entity, count in entity_counts.items()
+            if count >= min_occurrences
+        ]
+
+        # Sort by frequency (most common first)
+        cluster.shared_entities = sorted(
+            shared, key=lambda e: entity_counts[e], reverse=True
+        )
+
     def find_best_cluster(self, tab: Tab) -> Optional[tuple[TabCluster, float]]:
         """
-        Find the best matching cluster for a tab based on centroid similarity.
+        Find the best matching cluster for a tab using hybrid scoring.
+
+        If graph_db is available, uses both embedding similarity and entity overlap.
+        Otherwise, falls back to embedding-only matching.
 
         Args:
             tab: The tab to find a cluster for
@@ -241,9 +444,19 @@ Generate the name (no quotes, just the name):"""
             if cluster.centroid_embedding is None:
                 continue
 
-            similarity = self._cosine_similarity(
-                tab.embedding, cluster.centroid_embedding
-            )
+            # Use hybrid similarity if we have entities
+            if self.entity_weight > 0 and tab.entities and cluster.shared_entities:
+                similarity = self._hybrid_similarity(
+                    tab.embedding,
+                    cluster.centroid_embedding,
+                    tab.entities,
+                    cluster.shared_entities,
+                )
+            else:
+                # Fall back to embedding-only similarity
+                similarity = self._cosine_similarity(
+                    tab.embedding, cluster.centroid_embedding
+                )
 
             if similarity > best_similarity:
                 best_similarity = similarity
@@ -262,8 +475,10 @@ Generate the name (no quotes, just the name):"""
         This method:
         1. Adds the tab to the cluster
         2. Updates the centroid (eager evaluation)
-        3. Checks if rename is needed
-        4. Triggers rename if threshold reached
+        3. Updates shared entities
+        4. Stores tab in knowledge graph
+        5. Checks if rename is needed
+        6. Triggers rename if threshold reached
 
         Args:
             cluster: The cluster to add the tab to
@@ -274,6 +489,12 @@ Generate the name (no quotes, just the name):"""
 
         # Update centroid (eager evaluation - always recalculate)
         cluster.update_centroid()
+
+        # Update shared entities for the cluster
+        self._update_cluster_shared_entities(cluster)
+
+        # Store tab in knowledge graph
+        self._store_tab_in_graph(tab)
 
         # Check if rename needed (only triggered by additions)
         if cluster.should_regenerate_name(self.rename_threshold):
@@ -289,8 +510,10 @@ Generate the name (no quotes, just the name):"""
         This method:
         1. Removes the tab from the cluster
         2. Updates the centroid (prevents "ghost cluster" problem)
-        3. Does NOT trigger rename (removals don't change cluster theme)
-        4. Marks cluster for deletion if < 2 tabs remain
+        3. Updates shared entities
+        4. Removes tab from knowledge graph
+        5. Does NOT trigger rename (removals don't change cluster theme)
+        6. Marks cluster for deletion if < 2 tabs remain
 
         Args:
             cluster: The cluster to remove the tab from
@@ -305,6 +528,13 @@ Generate the name (no quotes, just the name):"""
             # Update centroid (eager evaluation)
             cluster.update_centroid()
 
+            # Update shared entities
+            self._update_cluster_shared_entities(cluster)
+
+            # Remove from knowledge graph
+            if self.graph_db:
+                self.graph_db.remove_tab(tab_id)
+
             # Check if cluster should be deleted
             if cluster.mark_for_deletion():
                 self.clusters.remove(cluster)
@@ -314,13 +544,14 @@ Generate the name (no quotes, just the name):"""
 
         return removed
 
-    def create_new_cluster(self, tab: Tab, initial_name: Optional[str] = None) -> TabCluster:
+    def create_new_cluster(self, tab: Tab, initial_name: Optional[str] = None, defer_naming: bool = False) -> TabCluster:
         """
         Create a new cluster with the given tab as the seed.
 
         Args:
             tab: Initial tab for the cluster
             initial_name: Optional initial name. If not provided, will be generated.
+            defer_naming: If True, skip LLM naming and use placeholder (saves API calls during batch ingestion)
 
         Returns:
             The newly created cluster
@@ -335,10 +566,18 @@ Generate the name (no quotes, just the name):"""
         )
 
         # Add the initial tab
+        # Temporarily disable naming during add to avoid immediate LLM call
+        original_threshold = self.rename_threshold
+        if defer_naming:
+            self.rename_threshold = 999  # Prevent naming during add
+
         self.add_tab_to_cluster(cluster, tab)
 
-        # Generate initial name
-        if not initial_name:
+        if defer_naming:
+            self.rename_threshold = original_threshold  # Restore threshold
+
+        # Generate initial name only if not deferring
+        if not initial_name and not defer_naming:
             cluster.name = self.generate_cluster_name(cluster)
             cluster.tabs_added_since_naming = 0  # Reset since we just named it
 
@@ -352,9 +591,11 @@ Generate the name (no quotes, just the name):"""
         Process a single tab: assign to existing cluster or create new one.
 
         This is the main entry point for tab clustering. It:
-        1. Generates embedding if not present
-        2. Finds best matching cluster
-        3. Either adds to existing cluster or creates new one
+        1. Extracts entities if not present
+        2. Generates embedding if not present
+        3. Finds best matching cluster (using hybrid scoring if enabled)
+        4. Either adds to existing cluster or creates new one
+        5. Stores tab in knowledge graph
 
         Args:
             tab: The tab to process
@@ -362,12 +603,20 @@ Generate the name (no quotes, just the name):"""
         Returns:
             The cluster the tab was assigned to
         """
+        # Extract entities if not present
+        if not tab.entities:
+            tab.entities = self.entity_extractor.extract_entities(
+                title=tab.title,
+                url=tab.url,
+                max_entities=8,
+            )
+
         # Generate embedding if not present
         if not tab.embedding:
             text = f"{tab.title} {tab.url}"
             tab.embedding = self.generate_embedding(text)
 
-        # Find best cluster
+        # Find best cluster (uses hybrid scoring if entity_weight > 0)
         result = self.find_best_cluster(tab)
 
         if result:
@@ -408,6 +657,9 @@ Generate the name (no quotes, just the name):"""
             for tab, embedding in zip(tabs_needing_embeddings, embeddings):
                 tab.embedding = embedding
 
+        # Track which clusters were created during this batch
+        clusters_before = set(c.id for c in self.clusters)
+
         # Now process all tabs (clustering assignment)
         for tab in tabs:
             # Skip embedding generation since we already have it
@@ -420,9 +672,24 @@ Generate the name (no quotes, just the name):"""
                 )
                 self.add_tab_to_cluster(cluster, tab)
             else:
-                # Create new cluster
+                # Create new cluster with deferred naming
                 print(f"Creating new cluster for tab '{tab.title}'")
-                self.create_new_cluster(tab)
+                self.create_new_cluster(tab, defer_naming=True)
+
+        # Name all newly created clusters in batch (after they have multiple tabs)
+        # Skip naming single-tab clusters (no point in creating tab groups for them)
+        clusters_after = set(c.id for c in self.clusters)
+        new_cluster_ids = clusters_after - clusters_before
+
+        for cluster in self.clusters:
+            if cluster.id in new_cluster_ids and cluster.name == "New Cluster":
+                # Only name clusters with 2+ tabs (singletons won't be grouped anyway)
+                if cluster.tab_count >= 2:
+                    cluster.name = self.generate_cluster_name(cluster)
+                    cluster.tabs_added_since_naming = 0
+                    print(f"Named new cluster: {cluster.name} (ID: {cluster.id[:8]})")
+                else:
+                    print(f"Skipped naming single-tab cluster (ID: {cluster.id[:8]})")
 
         return ClusteringResult(
             clusters=self.clusters.copy(),

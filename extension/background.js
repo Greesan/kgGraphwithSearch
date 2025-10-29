@@ -8,9 +8,12 @@
  * 4. Handles keyboard shortcuts
  */
 
+// Import configuration
+importScripts('config.js');
+
 // Configuration
-const BACKEND_URL = 'http://localhost:8000';
-const MONITOR_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
+const BACKEND_URL = CONFIG.BACKEND_URL;
+const MONITOR_INTERVAL = CONFIG.MONITOR_INTERVAL_MINUTES * 60 * 1000; // Convert minutes to milliseconds
 const IMPORTANT_TABS_KEY = 'importantTabs'; // Storage key for important tabs
 const EMBEDDINGS_CACHE_KEY = 'embeddingsCache'; // Storage key for embedding cache
 

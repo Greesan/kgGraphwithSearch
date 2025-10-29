@@ -2,7 +2,8 @@
  * TabGraph Popup UI Script
  */
 
-const BACKEND_URL = 'http://localhost:8000';
+// Configuration loaded from config.js
+const BACKEND_URL = CONFIG.BACKEND_URL;
 
 // ============================================================================
 // Initialization

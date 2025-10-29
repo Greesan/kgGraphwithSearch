@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>TabGraph - Knowledge Graph Visualization</title>
+  <link rel="stylesheet" href="graph.css">
+  <!-- Cytoscape.js for graph visualization -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <h1>📊 Knowledge Graph</h1>
+      <div class="controls">
+        <button id="refresh-button" title="Refresh Graph">
+          <span>🔄</span> Refresh
+        </button>
+        <button id="fit-button" title="Fit to View">
+          <span>🎯</span> Fit
+        </button>
+        <button id="close-button" title="Close">
+          <span>✕</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Filters -->
+    <div class="filters">
+      <label>
+        <input type="checkbox" id="show-singletons" />
+        Show unclustered tabs
+      </label>
+      <label>
+        Time range:
+        <select id="time-range">
+          <option value="">All time</option>
+          <option value="1">Last hour</option>
+          <option value="24" selected>Last 24 hours</option>
+          <option value="168">Last week</option>
+        </select>
+      </label>
+      <label>
+        Min cluster size:
+        <input type="number" id="min-cluster-size" value="2" min="1" max="10" />
+      </label>
+    </div>
+
+    <!-- Graph Container -->
+    <div id="cy"></div>
+
+    <!-- Info Panel -->
+    <div id="info-panel" class="info-panel hidden">
+      <div class="info-header">
+        <h3 id="info-title">Node Details</h3>
+        <button id="close-info">✕</button>
+      </div>
+      <div id="info-content"></div>
+    </div>
+
+    <!-- Legend -->
+    <div class="legend">
+      <h4>Legend</h4>
+      <div class="legend-item">
+        <div class="legend-icon cluster"></div>
+        <span>Cluster (tab group)</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-icon tab"></div>
+        <span>Tab</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-icon entity"></div>
+        <span>Entity (concept)</span>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-label">Clusters</span>
+        <span class="stat-value" id="cluster-count">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Tabs</span>
+        <span class="stat-value" id="tab-count">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Entities</span>
+        <span class="stat-value" id="entity-count">0</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="../config.js"></script>
+  <script src="graph.js"></script>
+</body>
+</html>

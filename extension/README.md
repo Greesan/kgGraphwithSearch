@@ -17,7 +17,7 @@ AI-powered tab management with automatic clustering and Chrome Tab Groups integr
 
 1. **Backend Server Running**
    - The extension requires the TabGraph backend server to be running
-   - Start it with: `uv run python examples/start_server.py`
+   - Start it with: `uv run python -m kg_graph_search.server.app`
    - Server should be accessible at `http://localhost:8000`
 
 2. **Chromium-Based Browser**
@@ -50,8 +50,8 @@ AI-powered tab management with automatic clustering and Chrome Tab Groups integr
    - See your tab groups listed
 
 3. **Wait for Auto-Sync** (5 minutes)
-   - Or click the refresh button (↻) in the popup to sync immediately
-   - The extension will send tab data to the backend
+   - Or click the refresh button in the popup to sync immediately
+   - Extension sends tab data to backend
    - Backend clusters tabs by semantic similarity
    - Chrome Tab Groups are created/updated automatically
 
@@ -88,7 +88,7 @@ extension/
 ### Data Flow
 
 ```
-1. background.js monitors all tabs every 5 minutes
+1. background.js monitors tabs every 5 minutes
    ↓
 2. Sends tab metadata to POST /api/tabs/ingest
    ↓
@@ -97,8 +97,6 @@ extension/
 4. Extension fetches GET /api/tabs/clusters
    ↓
 5. background.js creates/updates Chrome Tab Groups
-   ↓
-6. User sees tabs organized in native Chrome groups
 ```
 
 ### Important Tab Flow
@@ -106,22 +104,30 @@ extension/
 ```
 1. User presses Ctrl+Shift+I on active tab
    ↓
-2. background.js marks tab as important
+2. content.js extracts page content
    ↓
-3. content.js extracts page content (10k chars)
+3. Sent to backend for deep analysis
    ↓
-4. Content sent to backend for deep analysis
+4. Backend generates entities and relationships
    ↓
-5. Backend generates entities and relationships
+5. Stored in knowledge graph
 ```
 
 ## Configuration
 
 The extension connects to `http://localhost:8000` by default.
 
-To change the backend URL, edit `BACKEND_URL` in:
-- `extension/background.js`
-- `extension/popup/popup.js`
+To change settings, edit `extension/config.js`:
+
+```javascript
+const CONFIG = {
+  BACKEND_URL: 'http://localhost:8000',
+  MONITOR_INTERVAL_MINUTES: 5,
+  SIMILARITY_THRESHOLD: 0.70,
+};
+```
+
+After editing, reload the extension in `chrome://extensions`.
 
 ## Troubleshooting
 
@@ -130,7 +136,7 @@ To change the backend URL, edit `BACKEND_URL` in:
 **Problem**: Popup shows "Unable to connect to backend"
 
 **Solution**:
-1. Ensure backend server is running: `uv run python examples/start_server.py`
+1. Ensure backend server is running: `uv run python -m kg_graph_search.server.app`
 2. Check server is accessible at `http://localhost:8000`
 3. Check browser console for CORS errors
 
@@ -139,9 +145,9 @@ To change the backend URL, edit `BACKEND_URL` in:
 **Problem**: Tabs aren't being automatically grouped
 
 **Solution**:
-1. Click the refresh (↻) button in popup to force sync
+1. Click the refresh button in popup to force sync
 2. Check you have 10+ tabs open (clustering works better with more tabs)
-3. Open background service worker console (chrome://extensions → Details → Service Worker)
+3. Open service worker console (chrome://extensions → Details → Service Worker)
 4. Look for errors in console
 
 ### Keyboard Shortcut Not Working
@@ -164,13 +170,6 @@ To change the backend URL, edit `BACKEND_URL` in:
 
 ## Development
 
-### Testing
-
-Run backend API tests:
-```bash
-uv run pytest tests/backend/ -v
-```
-
 ### Debugging
 
 1. **Background Script Console**:
@@ -189,22 +188,15 @@ uv run pytest tests/backend/ -v
 
 ## Limitations
 
-- Requires backend server to be running locally
-- Tab monitoring runs every 5 minutes (not real-time)
+- Requires backend server running locally
+- Tab monitoring runs every 5 minutes
 - Content extraction limited to 10,000 characters
 - Cannot access chrome:// pages or other extensions
-- Clustering quality depends on having sufficient tabs (10+)
+- Clustering quality depends on sufficient tabs (10+)
 
 ## Next Steps
 
-**Planned Features** (not yet implemented):
-- Full graph visualization page
-- Recommendations panel
-- Settings page (adjust monitoring interval)
-- Privacy controls (exclude domains)
-- Historical session tracking
-
-See `PRD.md` for complete feature roadmap.
+See `../PRD.md` for complete feature roadmap and planned enhancements.
 
 ## License
 
