@@ -1,3 +1,8 @@
+HOLY IT ACTUALLY KINDA WORKS!
+
+<img width="1874" height="1013" alt="image" src="https://github.com/user-attachments/assets/6831e293-b731-4a8a-bdb8-88a5cc711cd6" />
+
+
 # TabGraph
 
 AI-powered browser extension that automatically organizes tabs into semantic groups using knowledge graphs and web APIs.
