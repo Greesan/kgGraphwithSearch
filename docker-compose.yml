@@ -1,0 +1,49 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tabgraph-backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Load from .env file
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - YOU_API_KEY=${YOU_API_KEY}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-gpt-4o-mini}
+      - DB_PATH=/app/data/knowledge_graph.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      # Persist database
+      - ./data:/app/data
+      # Mount source for development (optional - comment out for production)
+      - ./src:/app/src
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Optional: Neo4j database (uncomment if using Neo4j instead of SQLite)
+  # neo4j:
+  #   image: neo4j:5.14
+  #   container_name: tabgraph-neo4j
+  #   ports:
+  #     - "7474:7474"  # Web interface
+  #     - "7687:7687"  # Bolt protocol
+  #   environment:
+  #     - NEO4J_AUTH=neo4j/password
+  #     - NEO4J_dbms_memory_heap_max__size=2G
+  #   volumes:
+  #     - neo4j_data:/data
+  #     - neo4j_logs:/logs
+  #   restart: unless-stopped
+
+# volumes:
+#   neo4j_data:
+#   neo4j_logs:

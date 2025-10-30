@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from kg_graph_search.config import get_logger
+from kg_graph_search.config import get_logger, get_settings
 from kg_graph_search.agents.models import Tab
 from kg_graph_search.agents.tab_clusterer import TabClusterer
 from kg_graph_search.graph.database import KnowledgeGraphDB

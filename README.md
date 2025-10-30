@@ -7,26 +7,38 @@ HOLY IT ACTUALLY KINDA WORKS!
 
 AI-powered browser extension that automatically organizes tabs into semantic groups using knowledge graphs and web APIs.
 
-## Quick Start
+## Quick Start with Docker
 
-**1. Backend Setup**
+**Why Docker?** Works identically on Windows, Mac, and Linux. No Python version conflicts, no module import errors, no platform-specific issues. Just install Docker and you're ready to go.
+
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed
+
+**1. Clone and Configure**
 ```bash
+git clone <your-repo-url>
 cd kgGraphwithSearch
-uv sync
-cp .env.example .env  # Add OPENAI_API_KEY and YOU_API_KEY
-uv run python -m kg_graph_search.server.app
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY and YOU_API_KEY
 ```
 
-**2. Load Extension**
-1. Open `chrome://extensions` in any Chromium browser
-2. Enable "Developer mode"
-3. Click "Load unpacked" → select `extension/` directory
+**2. Start Backend**
+```bash
+docker compose up
+```
+
+The backend will start at `http://localhost:8000`. Check health: `http://localhost:8000/health`
+
+**3. Load Extension**
+1. Open `chrome://extensions` in any Chromium browser (Chrome, Edge, Brave, etc.)
+2. Enable "Developer mode" (toggle in top-right)
+3. Click "Load unpacked" → select the `extension/` directory
 4. Extension icon appears in toolbar
 
-**3. Start Using**
+**4. Start Using**
 - Open 10+ tabs on different topics
 - Extension auto-groups tabs every 5 minutes (or click refresh in popup)
 - Press `Ctrl+Shift+I` (Mac: `Cmd+Shift+I`) to mark tabs as important for deep analysis
+- View the knowledge graph: `http://localhost:8000/docs`
 
 ## Features
 
@@ -79,22 +91,41 @@ src/kg_graph_search/
 
 ## Troubleshooting
 
-**Extension shows "Unable to connect to backend"**
-- Ensure backend is running: `uv run python -m kg_graph_search.server.app`
-- Check `http://localhost:8000` is accessible
+### Backend Connection Issues
 
-**Tabs not grouping**
+**"Unable to connect to backend" error:**
+1. Ensure Docker is running: `docker --version`
+2. Check backend is up: `docker compose ps`
+3. Verify health endpoint: `http://localhost:8000/health`
+4. View logs: `docker compose logs -f backend`
+
+**Docker-specific issues:**
+- **Port already in use:** Another service is using port 8000. Stop it or edit `docker-compose.yml` to use a different port
+- **Container keeps restarting:** Check logs with `docker compose logs backend` for error messages
+- **Build fails:** Try `docker compose build --no-cache`
+- **Clean restart:** Run `docker compose down && docker compose up --build`
+
+**Manual installation issues (Linux/WSL only):**
+- **"No module named 'kg_graph_search'"** - Run `uv pip install -e .` from project root
+- **Import errors** - Ensure you're running from the correct directory with `pyproject.toml`
+- **uv not found** - Install uv: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+### Extension Issues
+
+**Tabs not grouping:**
+- Need 10+ tabs for optimal clustering (fewer tabs may not cluster)
 - Click refresh button in popup to force sync
-- Need 10+ tabs for optimal clustering
-- Check service worker console: `chrome://extensions` → Details → Service Worker
+- Check service worker console: `chrome://extensions` → Details → Service Worker → Console
 
-**Keyboard shortcut not working**
-- Verify at `chrome://extensions/shortcuts`
-- Check for conflicts with other extensions
+**Keyboard shortcut (`Ctrl+Shift+I`) not working:**
+- Verify shortcut at `chrome://extensions/shortcuts`
+- Check for conflicts with other extensions or OS shortcuts
+- Try clicking extension icon and manually marking tabs as important
 
-**Content not extracting from important tabs**
-- Cannot access chrome:// or other extension pages
+**Content not extracting from important tabs:**
+- Extension cannot access `chrome://` pages or other extension pages (browser security restriction)
 - Check page console (F12) for content script errors
+- Ensure page is fully loaded before marking as important
 
 ## Configuration
 
@@ -126,6 +157,23 @@ Key endpoints:
 - `GET /api/recommendations` - Get content suggestions
 
 See [PRD.md](./PRD.md) for complete specifications.
+
+## Advanced: Manual Installation (Linux/WSL)
+
+If you prefer not to use Docker or need a development setup:
+
+**Requirements:** Python 3.12+, [uv](https://github.com/astral-sh/uv) package manager
+
+**Setup:**
+```bash
+cd kgGraphwithSearch
+uv sync                     # Install dependencies
+uv pip install -e .         # Install package in editable mode
+cp .env.example .env        # Configure API keys
+uv run python -m kg_graph_search.server.app
+```
+
+**Note:** This method requires proper Python environment setup and may encounter platform-specific issues. Docker is recommended for most users.
 
 ## License
 
