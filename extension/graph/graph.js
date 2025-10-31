@@ -76,6 +76,10 @@ function initializeCytoscape() {
   cy = cytoscape({
     container: container,
 
+    // Enable multi-selection features
+    boxSelectionEnabled: true,  // Shift/Ctrl+drag for box selection
+    selectionType: 'additive',  // Ctrl+click toggles selection
+
     style: [
       // Cluster nodes (large circles)
       {
@@ -98,12 +102,12 @@ function initializeCytoscape() {
         }
       },
 
-      // Tab nodes (medium circles) - default blue
+      // Tab nodes (medium circles) - default bright blue
       {
         selector: 'node[type="tab"]',
         style: {
           'shape': 'ellipse',
-          'background-color': '#4A90E2',
+          'background-color': '#5FA8F5',
           'label': 'data(label)',
           'width': '45',
           'height': '45',
@@ -111,11 +115,11 @@ function initializeCytoscape() {
           'text-valign': 'bottom',
           'text-halign': 'center',
           'text-margin-y': 6,
-          'color': '#333',
-          'text-outline-width': 1,
-          'text-outline-color': '#fff',
+          'color': '#ffffff',
+          'text-outline-width': 2,
+          'text-outline-color': '#1a1a1a',
           'border-width': 2,
-          'border-color': '#fff',
+          'border-color': '#3a3a3a',
         }
       },
 
@@ -127,12 +131,12 @@ function initializeCytoscape() {
         }
       },
 
-      // Entity nodes (small circles)
+      // Entity nodes (small circles) - bright purple, hidden by default
       {
         selector: 'node[type="entity"]',
         style: {
           'shape': 'ellipse',
-          'background-color': '#9C27B0',
+          'background-color': '#B565E0',
           'label': 'data(label)',
           'width': '28',
           'height': '28',
@@ -140,18 +144,19 @@ function initializeCytoscape() {
           'text-valign': 'bottom',
           'text-halign': 'center',
           'text-margin-y': 4,
-          'color': '#666',
-          'text-outline-width': 1,
-          'text-outline-color': '#fff',
+          'color': '#ffffff',
+          'text-outline-width': 2,
+          'text-outline-color': '#1a1a1a',
+          'display': 'none',  // Hidden by default in cluster view
         }
       },
 
-      // Cluster->Tab edges (thick, gray)
+      // Cluster->Tab edges (thick, lighter gray)
       {
         selector: 'edge[type="contains"]',
         style: {
           'width': 3,
-          'line-color': '#999',
+          'line-color': '#5a5a5a',
           'curve-style': 'bezier',
         }
       },
@@ -161,25 +166,25 @@ function initializeCytoscape() {
         selector: 'edge[type="references"]',
         style: {
           'width': 1,
-          'line-color': '#ccc',
+          'line-color': '#4a4a4a',
           'curve-style': 'bezier',
         }
       },
 
-      // Entity->Entity edges (purple, with arrows and labels)
+      // Entity->Entity edges (bright purple, with arrows and labels)
       {
         selector: 'edge[type="relationship"]',
         style: {
           'width': 2,
-          'line-color': '#9C27B0',
+          'line-color': '#B565E0',
           'target-arrow-shape': 'triangle',
-          'target-arrow-color': '#9C27B0',
+          'target-arrow-color': '#B565E0',
           'curve-style': 'bezier',
           'label': 'data(label)',
           'font-size': '10px',
-          'color': '#666',
-          'text-background-color': '#fff',
-          'text-background-opacity': 0.8,
+          'color': '#ffffff',
+          'text-background-color': '#2a2a2a',
+          'text-background-opacity': 0.9,
           'text-background-padding': '2px',
         }
       },
@@ -198,6 +203,22 @@ function initializeCytoscape() {
         selector: '.hidden',
         style: {
           'display': 'none'
+        }
+      },
+
+      // Dimmed nodes (when selection is active in entity view)
+      {
+        selector: 'node.dimmed',
+        style: {
+          'opacity': 0.2,
+        }
+      },
+
+      // Dimmed edges (when selection is active in entity view)
+      {
+        selector: 'edge.dimmed',
+        style: {
+          'opacity': 0.2,
         }
       },
     ],
@@ -220,21 +241,56 @@ function initializeCytoscape() {
   cy.on('tap', 'node', (event) => {
     const node = event.target;
     showNodeInfo(node);
+
+    // When tab is selected, show its entities
+    if (node.data('type') === 'tab') {
+      showTabEntities(node);
+    }
+
+    // When cluster is selected (ctrl/cmd+click in additive mode), also select all its tabs
+    if (node.data('type') === 'cluster' && node.selected()) {
+      const clusterId = node.id();
+      // Select all tabs connected to this cluster
+      cy.nodes('[type="tab"]').filter(tabNode => {
+        return tabNode.data('cluster_id') === clusterId;
+      }).select();
+    }
   });
 
-  // Double-click on tab nodes - open URL in new tab
+  // Double-click on tab nodes - open URL in CURRENT tab
   cy.on('dbltap', 'node[type="tab"]', (event) => {
     const node = event.target;
     const url = node.data('url');
     if (url) {
-      chrome.tabs.create({ url: url, active: false });
+      // Update current tab instead of creating new one
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) {
+          chrome.tabs.update(tabs[0].id, { url: url });
+        }
+      });
     }
   });
 
-  // Background click handler (close info panel)
+  // Double-click on cluster nodes - collapse/expand cluster
+  cy.on('dbltap', 'node[type="cluster"]', (event) => {
+    const clusterNode = event.target;
+    toggleClusterCollapse(clusterNode);
+  });
+
+  // Background click handler (close info panel and reset entity visibility)
   cy.on('tap', (event) => {
     if (event.target === cy) {
       closeInfoPanel();
+
+      if (currentView === 'cluster') {
+        // Cluster view: Hide all entities when clicking background
+        cy.nodes('[type="entity"]').style('display', 'none');
+        cy.edges('[type="references"]').style('display', 'none');
+      } else {
+        // Entity view: Remove dimming from all nodes and edges
+        cy.nodes().removeClass('dimmed');
+        cy.edges().removeClass('dimmed');
+      }
     }
   });
 
@@ -323,6 +379,85 @@ function toggleView() {
 }
 
 /**
+ * Custom concentric circle layout for clusters.
+ * Positions: Cluster center → Tabs in inner ring → Entities in outer ring
+ */
+function applyConcentricLayout() {
+  if (!cy) return;
+
+  // Get all clusters
+  const clusters = cy.nodes('[type="cluster"]');
+
+  // Track positioned entities to handle shared entities
+  const positionedEntities = new Set();
+
+  // Spacing between clusters
+  const clusterSpacing = 600;
+  const clustersPerRow = Math.ceil(Math.sqrt(clusters.length));
+
+  clusters.forEach((clusterNode, clusterIndex) => {
+    const clusterId = clusterNode.id();
+
+    // Position cluster in grid
+    const row = Math.floor(clusterIndex / clustersPerRow);
+    const col = clusterIndex % clustersPerRow;
+    const clusterX = col * clusterSpacing;
+    const clusterY = row * clusterSpacing;
+
+    // Position cluster at center
+    clusterNode.position({ x: clusterX, y: clusterY });
+
+    // Get tabs connected to this cluster
+    const tabs = cy.edges(`[source="${clusterId}"][type="contains"]`)
+      .map(edge => cy.getElementById(edge.data('target')));
+
+    // Position tabs in inner circle around cluster
+    const tabRadius = 150;
+    const tabAngleStep = (2 * Math.PI) / Math.max(tabs.length, 1);
+
+    tabs.forEach((tabNode, tabIndex) => {
+      const angle = tabIndex * tabAngleStep;
+      const tabX = clusterX + tabRadius * Math.cos(angle);
+      const tabY = clusterY + tabRadius * Math.sin(angle);
+      tabNode.position({ x: tabX, y: tabY });
+
+      // Get entities connected to this tab
+      const entities = cy.edges(`[source="${tabNode.id()}"][type="references"]`)
+        .map(edge => cy.getElementById(edge.data('target')));
+
+      // Position entities in outer circle around their tab
+      const entityRadius = 80;
+      const entityAngleStep = (2 * Math.PI) / Math.max(entities.length, 1);
+
+      entities.forEach((entityNode, entityIndex) => {
+        const entityId = entityNode.id();
+
+        // Only position if not already positioned by another tab
+        if (!positionedEntities.has(entityId)) {
+          const entityAngle = angle + (entityIndex * entityAngleStep);
+          const entityX = tabX + entityRadius * Math.cos(entityAngle);
+          const entityY = tabY + entityRadius * Math.sin(entityAngle);
+          entityNode.position({ x: entityX, y: entityY });
+          positionedEntities.add(entityId);
+        }
+      });
+    });
+  });
+
+  // Handle orphaned nodes (not connected to clusters)
+  const orphanTabs = cy.nodes('[type="tab"]').filter(node =>
+    cy.edges(`[target="${node.id()}"][type="contains"]`).length === 0
+  );
+
+  if (orphanTabs.length > 0) {
+    const orphanY = Math.ceil(clusters.length / clustersPerRow) * clusterSpacing;
+    orphanTabs.forEach((node, index) => {
+      node.position({ x: index * 200, y: orphanY });
+    });
+  }
+}
+
+/**
  * Render the graph in the specified view mode.
  */
 function renderGraph(view) {
@@ -340,28 +475,20 @@ function renderGraph(view) {
     cy.elements().removeClass('hidden');
     cy.edges('[type="relationship"]').addClass('hidden');
 
-    // Run hierarchical layout optimized for clusters
-    cy.layout({
-      name: 'cose',
-      animate: true,
-      animationDuration: 500,
-      nodeRepulsion: 10000,
-      idealEdgeLength: function(edge) {
-        // Cluster-tab edges shorter, tab-entity edges longer
-        if (edge.data('type') === 'contains') return 80;
-        if (edge.data('type') === 'references') return 120;
-        return 100;
-      },
-      edgeElasticity: function(edge) {
-        // High elasticity for cluster-tab (keeps tabs near cluster)
-        if (edge.data('type') === 'contains') return 200;
-        return 100;
-      },
-      nestingFactor: 1.2,
-      gravity: 0.8,
-      numIter: 1500,
-      randomize: false,
-    }).run();
+    // Hide single-tab clusters (they add no value - just show the tab with entities)
+    cy.nodes('[type="cluster"]').forEach(clusterNode => {
+      const clusterId = clusterNode.id();
+      const tabCount = cy.edges(`[source="${clusterId}"][type="contains"]`).length;
+
+      if (tabCount <= 1) {
+        // Hide the cluster node and its edge
+        clusterNode.addClass('hidden');
+        cy.edges(`[source="${clusterId}"][type="contains"]`).addClass('hidden');
+      }
+    });
+
+    // Apply custom concentric circle layout
+    applyConcentricLayout();
 
   } else {
     // Entity View: Hide clusters, show entity relationships, color tabs by cluster
@@ -369,10 +496,41 @@ function renderGraph(view) {
     cy.edges('[type="contains"]').addClass('hidden');
     cy.edges('[type="relationship"]').removeClass('hidden');
 
+    // Show all entities in entity view
+    cy.nodes('[type="entity"]').style('display', 'element');
+    cy.edges('[type="references"]').style('display', 'element');
+
     // Slightly enlarge tabs in entity view (since no clusters)
     cy.nodes('[type="tab"]').style({
       'width': '50',
       'height': '50',
+    });
+
+    // Add tap handler for entity view to dim unconnected nodes
+    cy.on('tap', 'node', (event) => {
+      const selectedNode = event.target;
+
+      // Get all connected nodes (neighbors)
+      const connectedNodes = selectedNode.neighborhood().nodes();
+      const connectedNodeIds = new Set([selectedNode.id(), ...connectedNodes.map(n => n.id())]);
+
+      // Dim all nodes except selected and connected ones
+      cy.nodes().forEach(node => {
+        if (connectedNodeIds.has(node.id())) {
+          node.removeClass('dimmed');
+        } else {
+          node.addClass('dimmed');
+        }
+      });
+
+      // Dim edges not connected to selected node
+      cy.edges().forEach(edge => {
+        if (edge.source().id() === selectedNode.id() || edge.target().id() === selectedNode.id()) {
+          edge.removeClass('dimmed');
+        } else {
+          edge.addClass('dimmed');
+        }
+      });
     });
 
     // Run flat layout optimized for entity relationships
@@ -390,7 +548,10 @@ function renderGraph(view) {
   }
 
   // Fit to view after layout
-  setTimeout(() => fitGraph(), 600);
+  setTimeout(() => {
+    fitGraph();
+    updateLegend();
+  }, 600);
 }
 
 /**
@@ -401,12 +562,62 @@ function updateStats(metadata) {
   const tabCountEl = document.getElementById('tab-count');
   const entityCountEl = document.getElementById('entity-count');
 
-  if (clusterCountEl) clusterCountEl.textContent = metadata.cluster_count || 0;
-  if (tabCountEl) tabCountEl.textContent = metadata.tab_count || 0;
+  // Count visible clusters (excluding hidden single-tab clusters)
+  const visibleClusters = cy ? cy.nodes('[type="cluster"]').not('.hidden') : [];
+  const visibleClusterCount = visibleClusters.length;
+
+  // Count visible tabs (only tabs in visible clusters)
+  const visibleTabs = cy ? cy.nodes('[type="tab"]').not('.hidden') : [];
+  const visibleTabCount = visibleTabs.length;
+
+  if (clusterCountEl) clusterCountEl.textContent = visibleClusterCount;
+  if (tabCountEl) tabCountEl.textContent = visibleTabCount;
 
   // Count unique entities from nodes
   const entityCount = cy ? cy.nodes('[type="entity"]').length : 0;
   if (entityCountEl) entityCountEl.textContent = entityCount;
+}
+
+/**
+ * Update legend to show cluster colors and names dynamically.
+ */
+function updateLegend() {
+  if (!cy) return;
+
+  const legendContainer = document.querySelector('.legend');
+  if (!legendContainer) return;
+
+  // Get all cluster nodes
+  const clusterNodes = cy.nodes('[type="cluster"]');
+
+  // Build legend HTML
+  let legendHTML = '<h4>Legend</h4>';
+
+  // Add cluster items if any exist
+  if (clusterNodes.length > 0) {
+    clusterNodes.forEach(node => {
+      const color = node.data('color');
+      const label = node.data('label');
+      const tabCount = node.data('tab_count') || 0;
+
+      legendHTML += `
+        <div class="legend-item">
+          <div class="legend-icon" style="background: ${escapeHtml(color)}; width: 35px; height: 35px; border: 3px solid #3a3a3a; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);"></div>
+          <span>${escapeHtml(label)} (${tabCount} tabs)</span>
+        </div>
+      `;
+    });
+  }
+
+  // Add generic node type items
+  legendHTML += `
+    <div class="legend-item">
+      <div class="legend-icon entity"></div>
+      <span>Entity (concept)</span>
+    </div>
+  `;
+
+  legendContainer.innerHTML = legendHTML;
 }
 
 /**
@@ -475,10 +686,21 @@ function showNodeInfo(node) {
       </div>
     `;
   } else if (data.type === 'tab') {
+    // Build summary and topic HTML if available
+    const summaryHTML = data.summary
+      ? `<div class="info-section tab-summary">${escapeHtml(data.summary)}</div>`
+      : '';
+
+    const topicHTML = data.topic
+      ? `<div class="info-section"><span class="topic-badge">${escapeHtml(data.topic)}</span></div>`
+      : '';
+
     html = `
       <div class="info-section">
         <strong>Type:</strong> Tab
       </div>
+      ${summaryHTML}
+      ${topicHTML}
       <div class="info-section">
         <strong>URL:</strong><br>
         <a href="${escapeHtml(data.url)}" target="_blank">${escapeHtml(data.url)}</a>
@@ -579,16 +801,151 @@ function handleKeyDown(event) {
  * Close tabs by their IDs.
  */
 function closeTabsById(tabIds) {
+  // First, remove the nodes from the visualization immediately
+  const nodesToRemove = [];
+  tabIds.forEach(tabId => {
+    const nodeId = `tab_${tabId}`;
+    const node = cy.$(`#${nodeId}`);
+    if (node.length > 0) {
+      nodesToRemove.push(node);
+    }
+  });
+
+  // Remove nodes and their connected edges
+  nodesToRemove.forEach(node => {
+    node.remove();
+  });
+
+  // Update stats and legend after removal
+  if (graphData && graphData.metadata) {
+    graphData.metadata.tab_count = (graphData.metadata.tab_count || 0) - nodesToRemove.length;
+    updateStats(graphData.metadata);
+  }
+  updateLegend();
+
   // Remove tabs via Chrome API
   chrome.tabs.remove(tabIds, () => {
     if (chrome.runtime.lastError) {
       console.error('Error closing tabs:', chrome.runtime.lastError);
       alert('Failed to close some tabs. They may have already been closed.');
-    } else {
-      // Reload graph to reflect changes
+      // Reload graph to sync state
       setTimeout(() => loadGraph(), 500);
+    } else {
+      console.log(`Successfully closed ${tabIds.length} tab(s)`);
+
+      // Notify background script to trigger a re-sync
+      // This will update the backend clusters and ensure popup stats are accurate
+      chrome.runtime.sendMessage({ action: 'sync-now' }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn('Could not notify background script:', chrome.runtime.lastError);
+        } else {
+          console.log('Backend sync triggered after tab deletion');
+        }
+      });
     }
   });
+}
+
+// ============================================================================
+// Entity Visibility & Cluster Collapse
+// ============================================================================
+
+/**
+ * Show only entities connected to the selected tab.
+ */
+function showTabEntities(tabNode) {
+  if (!cy) return;
+
+  const tabId = tabNode.id();
+
+  // Get entities connected to this tab
+  const connectedEntities = cy.edges(`[source="${tabId}"][type="references"]`)
+    .map(edge => cy.getElementById(edge.data('target')));
+
+  const connectedEntityIds = new Set(connectedEntities.map(e => e.id()));
+
+  // Show only connected entities (hide all others)
+  cy.nodes('[type="entity"]').forEach(entityNode => {
+    if (connectedEntityIds.has(entityNode.id())) {
+      entityNode.style('display', 'element');  // Show connected entities
+      entityNode.connectedEdges().style('display', 'element');  // Show their edges
+    } else {
+      entityNode.style('display', 'none');  // Hide unconnected entities
+      entityNode.connectedEdges().style('display', 'none');  // Hide their edges
+    }
+  });
+}
+
+/**
+ * Toggle cluster collapse state (hide/show tabs and entities).
+ */
+function toggleClusterCollapse(clusterNode) {
+  if (!cy) return;
+
+  const clusterId = clusterNode.id();
+  const isCollapsed = clusterNode.hasClass('collapsed');
+
+  // Get Chrome tab group ID from first tab in this cluster
+  let chromeGroupId = null;
+  const firstEdge = cy.edges(`[source="${clusterId}"][type="contains"]`).first();
+  if (firstEdge.length > 0) {
+    const firstTab = cy.getElementById(firstEdge.data('target'));
+    chromeGroupId = firstTab.data('group_id');
+  }
+
+  if (isCollapsed) {
+    // Expand: Show tabs and their entities
+    clusterNode.removeClass('collapsed');
+
+    // Show tabs
+    cy.edges(`[source="${clusterId}"][type="contains"]`).forEach(edge => {
+      const tabNode = cy.getElementById(edge.data('target'));
+      tabNode.removeClass('hidden');
+      edge.removeClass('hidden');
+
+      // Show entities connected to this tab (but keep them hidden by default - user must click tab)
+      // Don't automatically show entities on expand
+    });
+
+    // Expand Chrome tab group
+    if (chromeGroupId) {
+      chrome.tabGroups.update(chromeGroupId, { collapsed: false }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('Error expanding Chrome tab group:', chrome.runtime.lastError);
+        } else {
+          console.log(`Expanded Chrome tab group ${chromeGroupId}`);
+        }
+      });
+    }
+  } else {
+    // Collapse: Hide tabs and their entities
+    clusterNode.addClass('collapsed');
+
+    // Hide tabs
+    cy.edges(`[source="${clusterId}"][type="contains"]`).forEach(edge => {
+      const tabNode = cy.getElementById(edge.data('target'));
+      tabNode.addClass('hidden');
+      edge.addClass('hidden');
+
+      // Hide entities connected to this tab (use style display, not class)
+      cy.edges(`[source="${tabNode.id()}"][type="references"]`).forEach(entityEdge => {
+        const entityNode = cy.getElementById(entityEdge.data('target'));
+        entityNode.style('display', 'none');
+        entityEdge.style('display', 'none');
+      });
+    });
+
+    // Collapse Chrome tab group
+    if (chromeGroupId) {
+      chrome.tabGroups.update(chromeGroupId, { collapsed: true }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('Error collapsing Chrome tab group:', chrome.runtime.lastError);
+        } else {
+          console.log(`Collapsed Chrome tab group ${chromeGroupId}`);
+        }
+      });
+    }
+  }
 }
 
 // ============================================================================

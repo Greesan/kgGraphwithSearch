@@ -10,7 +10,15 @@
       "WebFetch(domain:documentation.you.com)",
       "Bash(uv run python:*)",
       "Bash(python:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(find:*)",
+      "Bash(curl:*)",
+      "Bash(cd:*)",
+      "Bash(python3:*)",
+      "Bash(docker compose:*)",
+      "Bash(sqlite3:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []

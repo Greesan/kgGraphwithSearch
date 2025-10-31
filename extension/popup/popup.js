@@ -99,11 +99,6 @@ async function loadDashboardData() {
 
     const data = await response.json();
 
-    // Get important tabs count from background script
-    const { importantTabs } = await chrome.runtime.sendMessage({
-      action: 'get-important-tabs'
-    });
-
     // Get all current tabs to calculate ungrouped count
     const allTabs = await chrome.tabs.query({});
     const validTabs = allTabs.filter(tab =>
@@ -113,7 +108,7 @@ async function loadDashboardData() {
     );
 
     // Update UI
-    updateStats(data.clusters, importantTabs || [], validTabs);
+    updateStats(data.clusters, validTabs);
     updateGroupsList(data.clusters);
 
   } catch (error) {
@@ -126,10 +121,9 @@ async function loadDashboardData() {
  * Update statistics display.
  *
  * @param {Array} clusters - Clusters from backend
- * @param {Array} importantTabs - List of important tab IDs
  * @param {Array} allTabs - All current browser tabs
  */
-function updateStats(clusters, importantTabs, allTabs) {
+function updateStats(clusters, allTabs) {
   const groupedTabs = clusters.reduce((sum, cluster) => sum + cluster.tab_count, 0);
   const totalTabs = allTabs.length;
   const ungroupedTabs = totalTabs - groupedTabs;
@@ -137,7 +131,6 @@ function updateStats(clusters, importantTabs, allTabs) {
   document.getElementById('groups-count').textContent = clusters.length;
   document.getElementById('tabs-count').textContent = groupedTabs;
   document.getElementById('tabs-free-count').textContent = Math.max(0, ungroupedTabs);
-  document.getElementById('important-count').textContent = importantTabs.length;
 }
 
 /**

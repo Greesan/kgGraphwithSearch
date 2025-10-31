@@ -10,9 +10,10 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  background: #f5f5f5;
+  background: #1a1a1a;
   height: 100vh;
   overflow: hidden;
+  color: #e0e0e0;
 }
 
 .container {
@@ -72,9 +73,9 @@ header h1 {
  * ========================================================================= */
 
 .filters {
-  background: white;
+  background: #2a2a2a;
   padding: 1rem 1.5rem;
-  border-bottom: 1px solid #e0e0e0;
+  border-bottom: 1px solid #3a3a3a;
   display: flex;
   gap: 2rem;
   align-items: center;
@@ -85,7 +86,7 @@ header h1 {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.9rem;
-  color: #333;
+  color: #e0e0e0;
 }
 
 .filters input[type="checkbox"] {
@@ -97,9 +98,11 @@ header h1 {
 .filters select,
 .filters input[type="number"] {
   padding: 0.3rem 0.5rem;
-  border: 1px solid #ddd;
+  border: 1px solid #4a4a4a;
   border-radius: 4px;
   font-size: 0.9rem;
+  background: #333;
+  color: #e0e0e0;
 }
 
 .filters input[type="number"] {
@@ -112,7 +115,7 @@ header h1 {
 
 #cy {
   flex: 1;
-  background: #fafafa;
+  background: #1a1a1a;
   position: relative;
 }
 
@@ -126,9 +129,10 @@ header h1 {
   right: 20px;
   width: 350px;
   max-height: calc(100vh - 200px);
-  background: white;
+  background: #2a2a2a;
   border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  border: 1px solid #3a3a3a;
   overflow: hidden;
   transition: all 0.3s;
   z-index: 1000;
@@ -182,7 +186,7 @@ header h1 {
 .info-section {
   margin-bottom: 1rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid #3a3a3a;
 }
 
 .info-section:last-child {
@@ -193,14 +197,14 @@ header h1 {
 .info-section strong {
   display: block;
   margin-bottom: 0.5rem;
-  color: #667eea;
+  color: #8b9ff7;
   font-size: 0.85rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
 .info-section a {
-  color: #4A90E2;
+  color: #6ba3e6;
   text-decoration: none;
   word-break: break-all;
 }
@@ -216,13 +220,13 @@ header h1 {
 
 .info-section li {
   padding: 0.3rem 0;
-  color: #666;
+  color: #b0b0b0;
   font-size: 0.9rem;
 }
 
 .info-section li::before {
   content: "•";
-  color: #667eea;
+  color: #8b9ff7;
   margin-right: 0.5rem;
 }
 
@@ -234,17 +238,20 @@ header h1 {
   position: absolute;
   bottom: 80px;
   left: 20px;
-  background: white;
+  background: #2a2a2a;
   padding: 1rem;
   border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  border: 1px solid #3a3a3a;
   z-index: 100;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
 }
 
 .legend h4 {
   font-size: 0.9rem;
   margin-bottom: 0.75rem;
-  color: #333;
+  color: #e0e0e0;
   font-weight: 600;
 }
 
@@ -254,7 +261,7 @@ header h1 {
   gap: 0.75rem;
   margin-bottom: 0.5rem;
   font-size: 0.85rem;
-  color: #666;
+  color: #b0b0b0;
 }
 
 .legend-item:last-child {
@@ -277,14 +284,14 @@ header h1 {
 }
 
 .legend-icon.tab {
-  background: #4A90E2;
+  background: #5FA8F5;
   width: 22px;
   height: 22px;
-  border: 2px solid #fff;
+  border: 2px solid #3a3a3a;
 }
 
 .legend-icon.entity {
-  background: #9C27B0;
+  background: #B565E0;
   width: 14px;
   height: 14px;
 }
@@ -297,10 +304,11 @@ header h1 {
   position: absolute;
   top: 100px;
   left: 20px;
-  background: white;
+  background: #2a2a2a;
   padding: 1rem;
   border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  border: 1px solid #3a3a3a;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -315,7 +323,7 @@ header h1 {
 
 .stat-label {
   font-size: 0.75rem;
-  color: #999;
+  color: #888;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -323,7 +331,7 @@ header h1 {
 .stat-value {
   font-size: 1.5rem;
   font-weight: 700;
-  color: #667eea;
+  color: #8b9ff7;
 }
 
 /* ============================================================================
@@ -336,14 +344,14 @@ header h1 {
 }
 
 ::-webkit-scrollbar-track {
-  background: #f0f0f0;
+  background: #2a2a2a;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #ccc;
+  background: #4a4a4a;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #999;
+  background: #5a5a5a;
 }
