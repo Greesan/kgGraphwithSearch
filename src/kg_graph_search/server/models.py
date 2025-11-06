@@ -154,7 +154,9 @@ class GraphNodeData(BaseModel):
     color: Optional[str] = None
     cluster_id: Optional[str] = None  # For tabs - which cluster they belong to (NOT parent, to avoid compound nodes)
     url: Optional[str] = None  # For tabs
-    summary: Optional[str] = None  # For tabs - AI-generated summary
+    summary: Optional[str] = None  # For tabs - AI-generated summary (2-3 sentences)
+    source: Optional[str] = None  # For tabs - AI-generated source attribution (author/org/site)
+    display_label: Optional[str] = None  # For tabs - formatted label ("{label} • {source}")
     important: Optional[bool] = None  # For tabs
     entities: Optional[list[str]] = None  # For tabs
     opened_at: Optional[str] = None  # For tabs

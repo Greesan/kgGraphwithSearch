@@ -70,6 +70,25 @@ class KnowledgeGraphDB(GraphStore):
             # Column already exists
             pass
 
+        # Migration: Add metadata columns to tabs if they don't exist
+        try:
+            cursor.execute("ALTER TABLE tabs ADD COLUMN label TEXT")
+            logger.info("Added label column to tabs table")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE tabs ADD COLUMN source TEXT")
+            logger.info("Added source column to tabs table")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE tabs ADD COLUMN display_label TEXT")
+            logger.info("Added display_label column to tabs table")
+        except sqlite3.OperationalError:
+            pass
+
         # Triplets table (relationships)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS triplets (
@@ -96,6 +115,9 @@ class KnowledgeGraphDB(GraphStore):
                 title TEXT NOT NULL,
                 favicon_url TEXT,
                 summary TEXT,
+                label TEXT,
+                source TEXT,
+                display_label TEXT,
                 embedding BLOB,
                 opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 closed_at TIMESTAMP,
@@ -622,6 +644,8 @@ class KnowledgeGraphDB(GraphStore):
         """
         Update the summary field for a tab.
 
+        DEPRECATED: Use update_tab_metadata() instead for new code.
+
         Args:
             tab_id: Tab ID
             summary: Generated summary text
@@ -638,6 +662,56 @@ class KnowledgeGraphDB(GraphStore):
         """,
             (summary, tab_id),
         )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def update_tab_metadata(
+        self,
+        tab_id: int,
+        summary: Optional[str] = None,
+        label: Optional[str] = None,
+        source: Optional[str] = None,
+        display_label: Optional[str] = None,
+    ) -> bool:
+        """
+        Update metadata fields for a tab.
+
+        Args:
+            tab_id: Tab ID
+            summary: Generated summary text (2-3 sentences)
+            label: Concise 6-word-max label
+            source: Attribution (author/org/site)
+            display_label: Formatted display label ("{label} • {source}")
+
+        Returns:
+            True if updated successfully
+        """
+        cursor = self.conn.cursor()
+
+        # Build dynamic UPDATE query based on provided fields
+        updates = []
+        values = []
+
+        if summary is not None:
+            updates.append("summary = ?")
+            values.append(summary)
+        if label is not None:
+            updates.append("label = ?")
+            values.append(label)
+        if source is not None:
+            updates.append("source = ?")
+            values.append(source)
+        if display_label is not None:
+            updates.append("display_label = ?")
+            values.append(display_label)
+
+        if not updates:
+            return False
+
+        values.append(tab_id)
+        query = f"UPDATE tabs SET {', '.join(updates)} WHERE id = ?"
+
+        cursor.execute(query, values)
         self.conn.commit()
         return cursor.rowcount > 0
 
@@ -671,6 +745,9 @@ class KnowledgeGraphDB(GraphStore):
             "title": row["title"],
             "favicon_url": row["favicon_url"],
             "summary": row["summary"] if "summary" in row.keys() else None,
+            "label": row["label"] if "label" in row.keys() else None,
+            "source": row["source"] if "source" in row.keys() else None,
+            "display_label": row["display_label"] if "display_label" in row.keys() else None,
             "embedding": embedding,
             "opened_at": datetime.fromisoformat(row["opened_at"]) if row["opened_at"] else None,
             "closed_at": datetime.fromisoformat(row["closed_at"]) if row["closed_at"] else None,

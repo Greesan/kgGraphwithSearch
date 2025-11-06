@@ -618,21 +618,29 @@ async def get_graph_visualization(
         for tab in cluster.tabs:
             tab_id = f"tab_{tab.id}"
 
-            # Get tab summary from database if available
+            # Get tab metadata from database if available
             tab_data = graph_db.get_tab(tab.id) if graph_db else None
             tab_summary = tab_data.get("summary") if tab_data else None
+            tab_label = tab_data.get("label") if tab_data else None
+            tab_source = tab_data.get("source") if tab_data else None
+            tab_display_label = tab_data.get("display_label") if tab_data else None
+
+            # Use display_label if available, otherwise fall back to truncated title
+            node_label = tab_display_label or tab.title[:50]
 
             tab_node = GraphNode(
                 data=GraphNodeData(
                     id=tab_id,
                     type="tab",
-                    label=tab.title[:50],  # Truncate long titles
+                    label=node_label,  # Use display_label if available, else truncated title
                     # DO NOT set parent - causes compound nodes (boxes)
                     # Store cluster info for entity view color-coding
                     cluster_id=cluster_id,  # Custom field for entity view
                     color=cluster.color.value,  # Store cluster color
                     url=tab.url,
-                    summary=tab_summary,  # AI-generated summary
+                    summary=tab_summary,  # AI-generated summary (2-3 sentences)
+                    source=tab_source,  # AI-generated source attribution
+                    display_label=tab_display_label,  # Formatted label ("{label} • {source}")
                     important=tab.important,
                     entities=tab.entities,
                     opened_at=tab.created_at.isoformat() if tab.created_at else None,

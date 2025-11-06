@@ -15,10 +15,14 @@ class Settings(BaseSettings):
     # API Keys
     openai_api_key: str
     you_api_key: str
+    gemini_api_key: Optional[str] = None
 
     # Model Configuration
     openai_embedding_model: str = "text-embedding-3-small"
     openai_llm_model: str = "gpt-4o-mini"
+
+    # Tab Metadata Generation
+    tab_metadata_provider: str = "you"  # Options: "you", "gemini", "gemini_grounded"
 
     # Database Configuration
     db_path: Path = Path("./data/knowledge_graph.db")

@@ -26,7 +26,7 @@ from kg_graph_search.graph.database import KnowledgeGraphDB
 from kg_graph_search.graph.models import Entity
 from kg_graph_search.agents.entity_extractor import EntityExtractor
 from kg_graph_search.agents.entity_enricher import EntityEnricher
-from kg_graph_search.agents.tab_summarizer import TabSummarizer
+from kg_graph_search.agents.tab_summarizer import TabSummarizer, get_metadata_provider
 from kg_graph_search.search.you_client import YouAPIClient
 
 
@@ -98,13 +98,16 @@ class TabClusterer:
         # Entity extraction
         self.entity_extractor = EntityExtractor(self.openai_client, self.llm_model)
 
-        # Entity enrichment and tab summarization (optional - requires You.com API key)
+        # Entity enrichment and tab summarization (optional - requires API key)
         self.entity_enricher = None
         self.tab_summarizer = None
         if settings.you_api_key:
             you_client = YouAPIClient(api_key=settings.you_api_key)
             self.entity_enricher = EntityEnricher(you_client, cache_ttl_days=7)
-            self.tab_summarizer = TabSummarizer(you_client)
+
+            # Create metadata provider based on config
+            metadata_provider = get_metadata_provider(settings, you_client)
+            self.tab_summarizer = TabSummarizer(metadata_provider)
 
     def _get_next_color(self) -> ClusterColor:
         """Get the next available color for a new cluster (round-robin)."""
@@ -466,10 +469,10 @@ Return JSON with "names" array (one name per cluster, in order):"""
 
     def _generate_summary_async(self, tab_id: int, title: str, url: str) -> None:
         """
-        Generate tab summary asynchronously.
+        Generate tab metadata asynchronously.
 
-        This method generates summaries in the background without blocking
-        tab processing.
+        This method generates metadata (label, source, summary) in the background
+        without blocking tab processing.
 
         Args:
             tab_id: Tab ID
@@ -480,16 +483,22 @@ Return JSON with "names" array (one name per cluster, in order):"""
             return
 
         try:
-            # Generate summary
-            summary = self.tab_summarizer.summarize_tab(title, url)
+            # Generate metadata (label, source, summary, display_label)
+            metadata = self.tab_summarizer.summarize_tab(title, url)
 
-            if summary:
-                # Save to database
-                self.graph_db.update_tab_summary(tab_id, summary)
-                logger.info(f"Generated summary for tab {tab_id}: {title[:50]}")
+            if metadata:
+                # Save all metadata fields to database
+                self.graph_db.update_tab_metadata(
+                    tab_id=tab_id,
+                    summary=metadata.get("summary"),
+                    label=metadata.get("label"),
+                    source=metadata.get("source"),
+                    display_label=metadata.get("display_label"),
+                )
+                logger.info(f"Generated metadata for tab {tab_id}: {metadata.get('display_label', title[:50])}")
         except Exception as e:
-            # Silently fail summary generation - don't block tab processing
-            logger.warning(f"Failed to generate summary for tab {tab_id}: {e}")
+            # Silently fail metadata generation - don't block tab processing
+            logger.warning(f"Failed to generate metadata for tab {tab_id}: {e}")
 
     def _enrich_entity_async(self, entity_id: int, entity_name: str, tab: Tab) -> None:
         """
