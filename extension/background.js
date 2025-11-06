@@ -14,11 +14,11 @@ import { CONFIG } from './config.js';
 // Configuration
 const BACKEND_URL = CONFIG.BACKEND_URL;
 const MONITOR_INTERVAL = CONFIG.MONITOR_INTERVAL_MINUTES * 60 * 1000; // Convert minutes to milliseconds
-const EMBEDDINGS_CACHE_KEY = 'embeddingsCache'; // Storage key for embedding cache
+const TAB_CACHE_KEY = 'tabCache'; // Storage key for tab data cache
 
 // State
 let monitorIntervalId = null;
-let embeddingsCache = new Map(); // Cache: "url:title" -> embedding
+let tabCache = new Map(); // Cache: tabId -> {embedding, entities, timestamp}
 
 // ============================================================================
 // Initialization
@@ -30,19 +30,19 @@ let embeddingsCache = new Map(); // Cache: "url:title" -> embedding
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('TabGraph extension installed');
 
-  // Load embeddings cache from storage
-  const { embeddingsCache: cachedEmbeddings } = await chrome.storage.local.get([
-    EMBEDDINGS_CACHE_KEY
+  // Load tab cache from storage
+  const { tabCache: cachedTabs } = await chrome.storage.local.get([
+    TAB_CACHE_KEY
   ]);
 
-  // Load embeddings cache
-  if (cachedEmbeddings) {
-    embeddingsCache = new Map(Object.entries(cachedEmbeddings));
-    console.log(`Loaded ${embeddingsCache.size} cached embeddings`);
+  // Load tab cache
+  if (cachedTabs) {
+    tabCache = new Map(Object.entries(cachedTabs).map(([id, data]) => [parseInt(id), data]));
+    console.log(`Loaded ${tabCache.size} cached tabs`);
   }
 
-  // Start monitoring
-  startMonitoring();
+  // Automatic monitoring disabled - tabs will only sync on manual refresh
+  // startMonitoring();
 
   // Run initial sync
   await collectAndSendTabs();
@@ -53,7 +53,8 @@ chrome.runtime.onInstalled.addListener(async () => {
  */
 chrome.runtime.onStartup.addListener(() => {
   console.log('TabGraph extension started');
-  startMonitoring();
+  // Automatic monitoring disabled - tabs will only sync on manual refresh
+  // startMonitoring();
 });
 
 // ============================================================================
@@ -93,7 +94,7 @@ async function collectAndSendTabs() {
       !tab.url.startsWith('chrome-extension://')
     );
 
-    // Convert to API format
+    // Convert to API format (include cached data)
     const tabsData = validTabs.map(tab => {
       // Handle groupId safely - it might be undefined in older Chrome versions
       let groupId = null;
@@ -106,6 +107,9 @@ async function collectAndSendTabs() {
         console.warn('Tab groups not supported:', e);
       }
 
+      // Get cached data for this tab
+      const cached = tabCache.get(tab.id);
+
       return {
         id: tab.id,
         url: tab.url,
@@ -113,6 +117,8 @@ async function collectAndSendTabs() {
         favicon_url: tab.favIconUrl || null,
         window_id: tab.windowId,
         group_id: groupId,
+        embedding: cached?.embedding || null,  // Send cached embedding
+        entities: cached?.entities || null,    // Send cached entities
       };
     });
 
@@ -128,8 +134,7 @@ async function collectAndSendTabs() {
     let cacheMisses = 0;
 
     tabsData.forEach(tab => {
-      const cacheKey = `${tab.url}:${tab.title}`;
-      if (embeddingsCache.has(cacheKey)) {
+      if (tab.embedding && tab.entities) {
         cacheHits++;
       } else {
         cacheMisses++;
@@ -159,17 +164,22 @@ async function collectAndSendTabs() {
     const result = await response.json();
     console.log('Tabs ingested:', result);
 
-    // Cache embeddings for future use (simulated - backend would need to return them)
-    // For now, just mark that we've seen these tabs
-    tabsData.forEach(tab => {
-      const cacheKey = `${tab.url}:${tab.title}`;
-      if (!embeddingsCache.has(cacheKey)) {
-        embeddingsCache.set(cacheKey, true); // Placeholder - would store actual embedding
-      }
-    });
+    // Cache returned data (embeddings + entities) for future use
+    if (result.tab_data && Array.isArray(result.tab_data)) {
+      result.tab_data.forEach(tabData => {
+        if (tabData.embedding && tabData.entities) {
+          tabCache.set(tabData.id, {
+            embedding: tabData.embedding,
+            entities: tabData.entities,
+            timestamp: Date.now()
+          });
+        }
+      });
+      console.log(`Cached data for ${result.tab_data.length} tabs`);
+    }
 
     // Save updated cache to storage
-    await saveEmbeddingsCache();
+    await saveTabCache();
 
     // Get clusters and update tab groups (runs in background)
     await updateTabGroups();
@@ -185,14 +195,14 @@ async function collectAndSendTabs() {
 }
 
 /**
- * Save embeddings cache to chrome.storage.
+ * Save tab cache to chrome.storage.
  */
-async function saveEmbeddingsCache() {
+async function saveTabCache() {
   try {
     // Convert Map to object for storage
-    const cacheObj = Object.fromEntries(embeddingsCache);
-    await chrome.storage.local.set({ [EMBEDDINGS_CACHE_KEY]: cacheObj });
-    console.log(`Saved ${embeddingsCache.size} embeddings to cache`);
+    const cacheObj = Object.fromEntries(tabCache);
+    await chrome.storage.local.set({ [TAB_CACHE_KEY]: cacheObj });
+    console.log(`Saved ${tabCache.size} tabs to cache`);
   } catch (error) {
     console.error('Error saving embeddings cache:', error);
   }
@@ -336,6 +346,44 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     });
     return true; // Will respond asynchronously
+  }
+});
+
+// ============================================================================
+// Cache Invalidation
+// ============================================================================
+
+/**
+ * Invalidate cache when tab URL or title changes.
+ * This ensures we re-compute embeddings/entities for modified tabs.
+ */
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Clear cache when URL or title changes
+  if (changeInfo.url || changeInfo.title) {
+    if (tabCache.has(tabId)) {
+      tabCache.delete(tabId);
+      console.log(`Cache invalidated for tab ${tabId} (${changeInfo.url ? 'URL' : 'title'} changed)`);
+
+      // Save updated cache asynchronously
+      saveTabCache().catch(err => {
+        console.error('Error saving cache after invalidation:', err);
+      });
+    }
+  }
+});
+
+/**
+ * Clean up cache when tab is closed.
+ */
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabCache.has(tabId)) {
+    tabCache.delete(tabId);
+    console.log(`Cache cleared for closed tab ${tabId}`);
+
+    // Save updated cache asynchronously
+    saveTabCache().catch(err => {
+      console.error('Error saving cache after tab removal:', err);
+    });
   }
 });
 

@@ -49,9 +49,26 @@ class KnowledgeGraphDB(GraphStore):
                 source_url TEXT,
                 is_enriched INTEGER DEFAULT 0,
                 enriched_at TIMESTAMP,
+                embedding BLOB,
                 UNIQUE(name, entity_type)
             )
         """)
+
+        # Migration: Add embedding column if it doesn't exist (for existing databases)
+        try:
+            cursor.execute("ALTER TABLE entities ADD COLUMN embedding BLOB")
+            logger.info("Added embedding column to entities table")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Migration: Add summary column to tabs if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE tabs ADD COLUMN summary TEXT")
+            logger.info("Added summary column to tabs table")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
 
         # Triplets table (relationships)
         cursor.execute("""
@@ -78,6 +95,7 @@ class KnowledgeGraphDB(GraphStore):
                 url TEXT NOT NULL,
                 title TEXT NOT NULL,
                 favicon_url TEXT,
+                summary TEXT,
                 embedding BLOB,
                 opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 closed_at TIMESTAMP,
@@ -99,6 +117,19 @@ class KnowledgeGraphDB(GraphStore):
                 PRIMARY KEY (tab_id, entity_id),
                 FOREIGN KEY (tab_id) REFERENCES tabs(id) ON DELETE CASCADE,
                 FOREIGN KEY (entity_id) REFERENCES entities(id)
+            )
+        """)
+
+        # Entity-Tab context descriptions (per-tab entity descriptions)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS entity_tab_contexts (
+                entity_id INTEGER NOT NULL,
+                tab_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                enriched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (entity_id, tab_id),
+                FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
+                FOREIGN KEY (tab_id) REFERENCES tabs(id) ON DELETE CASCADE
             )
         """)
 
@@ -185,6 +216,16 @@ class KnowledgeGraphDB(GraphStore):
             ON tab_relationships(relationship_strength)
         """)
 
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entity_tab_contexts_entity
+            ON entity_tab_contexts(entity_id)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entity_tab_contexts_tab
+            ON entity_tab_contexts(tab_id)
+        """)
+
         self.conn.commit()
 
     def add_entity(self, entity: Entity) -> int:
@@ -202,15 +243,20 @@ class KnowledgeGraphDB(GraphStore):
         # Convert related_concepts list to JSON string
         related_concepts_json = json.dumps(entity.related_concepts) if entity.related_concepts else None
 
+        # Convert embedding to binary if provided
+        embedding_blob = None
+        if entity.embedding:
+            embedding_blob = struct.pack(f'{len(entity.embedding)}f', *entity.embedding)
+
         # Try to insert, or get existing ID if already exists
         cursor.execute(
             """
             INSERT OR IGNORE INTO entities (
                 name, entity_type, description, created_at,
                 web_description, related_concepts, source_url,
-                is_enriched, enriched_at
+                is_enriched, enriched_at, embedding
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 entity.name,
@@ -222,6 +268,7 @@ class KnowledgeGraphDB(GraphStore):
                 entity.source_url,
                 1 if entity.is_enriched else 0,
                 entity.enriched_at,
+                embedding_blob,
             ),
         )
 
@@ -255,6 +302,12 @@ class KnowledgeGraphDB(GraphStore):
                 except json.JSONDecodeError:
                     related_concepts = []
 
+            # Deserialize embedding if present
+            embedding = None
+            if row["embedding"]:
+                num_floats = len(row["embedding"]) // 4
+                embedding = list(struct.unpack(f'{num_floats}f', row["embedding"]))
+
             return Entity(
                 id=row["id"],
                 name=row["name"],
@@ -266,6 +319,7 @@ class KnowledgeGraphDB(GraphStore):
                 source_url=row["source_url"],
                 is_enriched=bool(row["is_enriched"]),
                 enriched_at=datetime.fromisoformat(row["enriched_at"]) if row["enriched_at"] else None,
+                embedding=embedding,
             )
         return None
 
@@ -291,6 +345,12 @@ class KnowledgeGraphDB(GraphStore):
                 except json.JSONDecodeError:
                     related_concepts = []
 
+            # Deserialize embedding if present
+            embedding = None
+            if row["embedding"]:
+                num_floats = len(row["embedding"]) // 4
+                embedding = list(struct.unpack(f'{num_floats}f', row["embedding"]))
+
             return Entity(
                 id=row["id"],
                 name=row["name"],
@@ -302,6 +362,7 @@ class KnowledgeGraphDB(GraphStore):
                 source_url=row["source_url"],
                 is_enriched=bool(row["is_enriched"]),
                 enriched_at=datetime.fromisoformat(row["enriched_at"]) if row["enriched_at"] else None,
+                embedding=embedding,
             )
         return None
 
@@ -376,6 +437,58 @@ class KnowledgeGraphDB(GraphStore):
             """
 
         cursor.execute(query, (entity_id,))
+        rows = cursor.fetchall()
+
+        triplets = []
+        for row in rows:
+            temporal = TemporalValidityRange(
+                start_time=datetime.fromisoformat(row["start_time"]) if row["start_time"] else None,
+                end_time=datetime.fromisoformat(row["end_time"]) if row["end_time"] else None,
+                is_current=bool(row["is_current"]),
+            )
+
+            triplets.append(
+                Triplet(
+                    id=row["id"],
+                    subject_id=row["subject_id"],
+                    subject_name=row["subject_name"],
+                    predicate=row["predicate"],
+                    object_id=row["object_id"],
+                    object_name=row["object_name"],
+                    temporal_validity=temporal,
+                    confidence=row["confidence"],
+                    source=row["source"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+            )
+
+        return triplets
+
+    def get_all_triplets(self, limit: int = 100) -> list[Triplet]:
+        """
+        Get all triplets from the database.
+
+        Args:
+            limit: Maximum number of triplets to return (default: 100)
+
+        Returns:
+            List of triplets with entity names populated
+        """
+        cursor = self.conn.cursor()
+
+        query = """
+            SELECT t.*,
+                   e1.name as subject_name,
+                   e2.name as object_name
+            FROM triplets t
+            JOIN entities e1 ON t.subject_id = e1.id
+            JOIN entities e2 ON t.object_id = e2.id
+            WHERE t.is_current = 1
+            ORDER BY t.confidence DESC
+            LIMIT ?
+        """
+
+        cursor.execute(query, (limit,))
         rows = cursor.fetchall()
 
         triplets = []
@@ -505,6 +618,29 @@ class KnowledgeGraphDB(GraphStore):
         self.conn.commit()
         return tab_id
 
+    def update_tab_summary(self, tab_id: int, summary: str) -> bool:
+        """
+        Update the summary field for a tab.
+
+        Args:
+            tab_id: Tab ID
+            summary: Generated summary text
+
+        Returns:
+            True if updated successfully
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            UPDATE tabs
+            SET summary = ?
+            WHERE id = ?
+        """,
+            (summary, tab_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def get_tab(self, tab_id: int) -> Optional[dict]:
         """
         Get a tab by ID.
@@ -534,6 +670,7 @@ class KnowledgeGraphDB(GraphStore):
             "url": row["url"],
             "title": row["title"],
             "favicon_url": row["favicon_url"],
+            "summary": row["summary"] if "summary" in row.keys() else None,
             "embedding": embedding,
             "opened_at": datetime.fromisoformat(row["opened_at"]) if row["opened_at"] else None,
             "closed_at": datetime.fromisoformat(row["closed_at"]) if row["closed_at"] else None,
@@ -770,6 +907,86 @@ class KnowledgeGraphDB(GraphStore):
         cursor.execute("DELETE FROM tabs WHERE id = ?", (tab_id,))
         self.conn.commit()
         return cursor.rowcount > 0
+
+    def get_orphaned_entities(self) -> list[int]:
+        """
+        Find entities that are not connected to any tabs.
+
+        Returns:
+            List of entity IDs that have no tab connections
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT e.id
+            FROM entities e
+            LEFT JOIN tab_entities te ON e.id = te.entity_id
+            WHERE te.entity_id IS NULL
+        """
+        )
+        return [row["id"] for row in cursor.fetchall()]
+
+    def remove_entity(self, entity_id: int) -> bool:
+        """
+        Remove an entity from the database.
+
+        This also deletes all associated triplets.
+
+        Args:
+            entity_id: The entity ID to remove
+
+        Returns:
+            True if entity was removed, False if not found
+        """
+        cursor = self.conn.cursor()
+
+        # Delete triplets involving this entity
+        cursor.execute(
+            "DELETE FROM triplets WHERE subject_id = ? OR object_id = ?",
+            (entity_id, entity_id)
+        )
+
+        # Delete the entity itself
+        cursor.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def remove_orphaned_entities(self) -> int:
+        """
+        Remove all entities that are not connected to any tabs.
+
+        Returns:
+            Number of entities removed
+        """
+        orphaned_ids = self.get_orphaned_entities()
+
+        if not orphaned_ids:
+            return 0
+
+        cursor = self.conn.cursor()
+
+        # Build query with placeholders
+        placeholders = ",".join("?" * len(orphaned_ids))
+
+        # Delete triplets involving orphaned entities
+        cursor.execute(
+            f"""
+            DELETE FROM triplets
+            WHERE subject_id IN ({placeholders}) OR object_id IN ({placeholders})
+        """,
+            orphaned_ids + orphaned_ids
+        )
+
+        # Delete orphaned entities
+        cursor.execute(
+            f"DELETE FROM entities WHERE id IN ({placeholders})",
+            orphaned_ids
+        )
+
+        self.conn.commit()
+        logger.info(f"Removed {len(orphaned_ids)} orphaned entities")
+        return len(orphaned_ids)
 
     def get_active_tabs(self) -> list[dict]:
         """
@@ -1129,6 +1346,113 @@ class KnowledgeGraphDB(GraphStore):
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def save_entity_tab_context(
+        self,
+        entity_id: int,
+        tab_id: int,
+        description: str,
+    ) -> bool:
+        """
+        Save a per-tab contextual description for an entity.
+
+        Args:
+            entity_id: Entity ID
+            tab_id: Tab ID providing the context
+            description: Context-specific description
+
+        Returns:
+            True if saved successfully
+        """
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO entity_tab_contexts
+                (entity_id, tab_id, description, enriched_at)
+            VALUES (?, ?, ?, ?)
+        """,
+            (entity_id, tab_id, description, datetime.now(UTC)),
+        )
+
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_entity_tab_context(
+        self, entity_id: int, tab_id: int
+    ) -> Optional[str]:
+        """
+        Get the context-specific description for an entity in a specific tab.
+
+        Args:
+            entity_id: Entity ID
+            tab_id: Tab ID
+
+        Returns:
+            Description string or None if not found
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT description
+            FROM entity_tab_contexts
+            WHERE entity_id = ? AND tab_id = ?
+        """,
+            (entity_id, tab_id),
+        )
+        row = cursor.fetchone()
+        return row["description"] if row else None
+
+    def get_all_entity_tab_contexts(
+        self, entity_id: int
+    ) -> dict[int, str]:
+        """
+        Get all per-tab contextual descriptions for an entity.
+
+        Args:
+            entity_id: Entity ID
+
+        Returns:
+            Dictionary mapping tab_id -> description
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT tab_id, description
+            FROM entity_tab_contexts
+            WHERE entity_id = ?
+        """,
+            (entity_id,),
+        )
+        rows = cursor.fetchall()
+        return {row["tab_id"]: row["description"] for row in rows}
+
+    def delete_entity_tab_context(
+        self, entity_id: int, tab_id: int
+    ) -> bool:
+        """
+        Delete a specific entity-tab context.
+
+        Note: CASCADE should handle this automatically when tab is deleted,
+        but this method is provided for manual cleanup.
+
+        Args:
+            entity_id: Entity ID
+            tab_id: Tab ID
+
+        Returns:
+            True if deleted successfully
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM entity_tab_contexts
+            WHERE entity_id = ? AND tab_id = ?
+        """,
+            (entity_id, tab_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def needs_enrichment(self, entity_id: int, cache_ttl_days: int = 7) -> bool:
         """
         Check if an entity needs enrichment or re-enrichment.
@@ -1265,6 +1589,12 @@ class KnowledgeGraphDB(GraphStore):
             except json.JSONDecodeError:
                 related_concepts = []
 
+        # Deserialize embedding if present
+        embedding = None
+        if row["embedding"]:
+            num_floats = len(row["embedding"]) // 4
+            embedding = list(struct.unpack(f'{num_floats}f', row["embedding"]))
+
         return Entity(
             id=row["id"],
             name=row["name"],
@@ -1276,7 +1606,71 @@ class KnowledgeGraphDB(GraphStore):
             source_url=row["source_url"],
             is_enriched=bool(row["is_enriched"]),
             enriched_at=datetime.fromisoformat(row["enriched_at"]) if row["enriched_at"] else None,
+            embedding=embedding,
         )
+
+    def get_entities_by_names(self, names: list[str]) -> list[Entity]:
+        """
+        Get multiple entities by their names in a single query (batch fetch).
+
+        This method eliminates N+1 query patterns when checking multiple entities.
+
+        Args:
+            names: List of entity names to fetch
+
+        Returns:
+            List of Entity objects found in database
+
+        Example:
+            >>> entities = db.get_entities_by_names(["React", "Vue", "Angular"])
+            >>> print(f"Found {len(entities)} entities")
+        """
+        if not names:
+            return []
+
+        cursor = self.conn.cursor()
+
+        # Build query with placeholders for IN clause
+        placeholders = ",".join("?" * len(names))
+        query = f"""
+            SELECT * FROM entities
+            WHERE name IN ({placeholders})
+        """
+
+        cursor.execute(query, names)
+        rows = cursor.fetchall()
+
+        entities = []
+        for row in rows:
+            # Parse related_concepts JSON
+            related_concepts = []
+            if row["related_concepts"]:
+                try:
+                    related_concepts = json.loads(row["related_concepts"])
+                except json.JSONDecodeError:
+                    related_concepts = []
+
+            # Deserialize embedding if present
+            embedding = None
+            if row["embedding"]:
+                num_floats = len(row["embedding"]) // 4
+                embedding = list(struct.unpack(f'{num_floats}f', row["embedding"]))
+
+            entities.append(Entity(
+                id=row["id"],
+                name=row["name"],
+                entity_type=row["entity_type"],
+                description=row["description"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                web_description=row["web_description"],
+                related_concepts=related_concepts,
+                source_url=row["source_url"],
+                is_enriched=bool(row["is_enriched"]),
+                enriched_at=datetime.fromisoformat(row["enriched_at"]) if row["enriched_at"] else None,
+                embedding=embedding,
+            ))
+
+        return entities
 
     def get_relationships_for_entities(self, entity_names: list[str]) -> list[Triplet]:
         """

@@ -26,6 +26,7 @@ from kg_graph_search.graph.database import KnowledgeGraphDB
 from kg_graph_search.graph.models import Entity
 from kg_graph_search.agents.entity_extractor import EntityExtractor
 from kg_graph_search.agents.entity_enricher import EntityEnricher
+from kg_graph_search.agents.tab_summarizer import TabSummarizer
 from kg_graph_search.search.you_client import YouAPIClient
 
 
@@ -97,11 +98,13 @@ class TabClusterer:
         # Entity extraction
         self.entity_extractor = EntityExtractor(self.openai_client, self.llm_model)
 
-        # Entity enrichment (optional - requires You.com API key)
+        # Entity enrichment and tab summarization (optional - requires You.com API key)
         self.entity_enricher = None
+        self.tab_summarizer = None
         if settings.you_api_key:
             you_client = YouAPIClient(api_key=settings.you_api_key)
             self.entity_enricher = EntityEnricher(you_client, cache_ttl_days=7)
+            self.tab_summarizer = TabSummarizer(you_client)
 
     def _get_next_color(self) -> ClusterColor:
         """Get the next available color for a new cluster (round-robin)."""
@@ -304,6 +307,103 @@ Generate the name (no quotes, just the name):"""
             logger.warning(f"Failed to generate cluster name via LLM: {e}")
             return f"Cluster {cluster.id[:8]}"
 
+    def generate_cluster_names_batch(
+        self, clusters: list[TabCluster], max_tabs_per_cluster: int = 10
+    ) -> list[str]:
+        """
+        Generate names for multiple clusters in a single API call.
+
+        This is ~5x faster than calling generate_cluster_name() sequentially.
+        Uses OpenAI Structured Outputs for guaranteed JSON schema adherence.
+
+        Args:
+            clusters: List of clusters to name
+            max_tabs_per_cluster: Maximum tabs to include per cluster (default: 10)
+
+        Returns:
+            List of cluster names in same order as input clusters
+        """
+        if not clusters:
+            return []
+
+        # Build batch descriptions
+        cluster_descriptions = []
+        for i, cluster in enumerate(clusters):
+            tab_titles = cluster.get_tab_titles()[:max_tabs_per_cluster]
+            entities = cluster.shared_entities[:10]
+
+            cluster_descriptions.append({
+                "index": i,
+                "tab_titles": tab_titles,
+                "common_entities": entities
+            })
+
+        # Build prompt
+        import json
+        prompt = f"""You are naming browser tab groups. Generate a broad, general category name (1-3 words) for each group.
+
+{json.dumps(cluster_descriptions, indent=2)}
+
+Rules:
+- Use 1-3 words maximum per name
+- Be GENERAL and BROAD - think high-level categories
+- Use title case
+- Avoid overly specific details
+
+Examples:
+- "Development" (not "React Development")
+- "Databases" (not "Graph Database Research")
+- "Research" (not "Academic Paper Review")
+
+Return JSON with "names" array (one name per cluster, in order):"""
+
+        # Define schema for structured output
+        schema = {
+            "type": "object",
+            "properties": {
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "required": ["names"]
+        }
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "cluster_names",
+                        "schema": schema,
+                        "strict": True
+                    }
+                },
+                max_tokens=200,
+                temperature=0.3,
+            )
+
+            result = json.loads(response.choices[0].message.content)
+            names = result.get("names", [])
+
+            # Validate we got the right number of names
+            if len(names) != len(clusters):
+                logger.warning(f"Expected {len(clusters)} names, got {len(names)}. Falling back to sequential naming.")
+                raise ValueError(f"Mismatch in cluster count: expected {len(clusters)}, got {len(names)}")
+
+            # Clean up names (remove quotes if present)
+            names = [name.strip('"').strip("'") for name in names]
+
+            logger.info(f"Successfully generated {len(names)} cluster names in batch")
+            return names
+
+        except Exception as e:
+            # Fallback to sequential naming on error
+            logger.warning(f"Batch cluster naming failed: {e}. Falling back to sequential naming.")
+            return [self.generate_cluster_name(c, max_tabs_per_cluster) for c in clusters]
+
     def _store_tab_in_graph(self, tab: Tab) -> None:
         """
         Store tab and its entities in the knowledge graph.
@@ -327,6 +427,10 @@ Generate the name (no quotes, just the name):"""
             group_id=tab.group_id,
         )
 
+        # Generate tab summary asynchronously (non-blocking)
+        if self.tab_summarizer and not tab.summary:
+            self._generate_summary_async(tab.id, tab.title, tab.url)
+
         # Store entities and link to tab
         for entity_name in tab.entities:
             # Create or get entity
@@ -340,15 +444,18 @@ Generate the name (no quotes, just the name):"""
                 )
                 entity_id = self.graph_db.add_entity(entity)
 
-                # Enrich new entity if enricher is available
+                # Enrich new entity if enricher is available (with tab context)
                 if self.entity_enricher:
-                    self._enrich_entity_async(entity_id, entity_name)
+                    self._enrich_entity_async(entity_id, entity_name, tab)
             else:
                 entity_id = entity.id
 
-                # Check if existing entity needs re-enrichment
-                if self.entity_enricher and self.graph_db.needs_enrichment(entity_id):
-                    self._enrich_entity_async(entity_id, entity_name)
+                # Check if we need to enrich this entity for this specific tab
+                # Always enrich if we don't have a context for this (entity, tab) pair
+                if self.entity_enricher:
+                    existing_context = self.graph_db.get_entity_tab_context(entity_id, tab.id)
+                    if not existing_context:
+                        self._enrich_entity_async(entity_id, entity_name, tab)
 
             # Link tab to entity
             self.graph_db.link_tab_to_entity(tab.id, entity_id)
@@ -357,9 +464,39 @@ Generate the name (no quotes, just the name):"""
         if tab.entities:  # Only compute if tab has entities
             self.graph_db.compute_and_store_tab_relationships(tab.id, min_shared=1)
 
-    def _enrich_entity_async(self, entity_id: int, entity_name: str) -> None:
+    def _generate_summary_async(self, tab_id: int, title: str, url: str) -> None:
         """
-        Enrich an entity with web data asynchronously.
+        Generate tab summary asynchronously.
+
+        This method generates summaries in the background without blocking
+        tab processing.
+
+        Args:
+            tab_id: Tab ID
+            title: Tab title
+            url: Tab URL
+        """
+        if not self.tab_summarizer or not self.graph_db:
+            return
+
+        try:
+            # Generate summary
+            summary = self.tab_summarizer.summarize_tab(title, url)
+
+            if summary:
+                # Save to database
+                self.graph_db.update_tab_summary(tab_id, summary)
+                logger.info(f"Generated summary for tab {tab_id}: {title[:50]}")
+        except Exception as e:
+            # Silently fail summary generation - don't block tab processing
+            logger.warning(f"Failed to generate summary for tab {tab_id}: {e}")
+
+    def _enrich_entity_async(self, entity_id: int, entity_name: str, tab: Tab) -> None:
+        """
+        Enrich an entity with web data asynchronously using tab context.
+
+        Generates context-aware descriptions by providing tab URL, title, summary,
+        and related entities to the enricher.
 
         This method enriches entities in the background without blocking
         tab processing. In production, this should be done with proper
@@ -368,16 +505,39 @@ Generate the name (no quotes, just the name):"""
         Args:
             entity_id: ID of the entity to enrich
             entity_name: Name of the entity
+            tab: Source tab providing context
         """
         if not self.entity_enricher or not self.graph_db:
             return
 
         try:
-            # Get enrichment data from You.com
-            enrichment_data = self.entity_enricher.enrich_entity(entity_name)
+            # Get tab summary if available (may not be generated yet)
+            tab_data = self.graph_db.get_tab(tab.id)
+            tab_summary = tab_data.get("summary") if tab_data else None
+
+            # Get other entities from this tab for context
+            related_entities = [e for e in tab.entities if e != entity_name]
+
+            # Get enrichment data from You.com with tab context
+            enrichment_data = self.entity_enricher.enrich_entity(
+                entity_name=entity_name,
+                tab_id=tab.id,
+                tab_url=tab.url,
+                tab_title=tab.title,
+                tab_summary=tab_summary,
+                related_entities=related_entities,
+            )
 
             if enrichment_data["is_enriched"]:
-                # Update entity in database
+                # Save per-tab contextual description
+                if enrichment_data.get("tab_id") and enrichment_data["description"]:
+                    self.graph_db.save_entity_tab_context(
+                        entity_id=entity_id,
+                        tab_id=tab.id,
+                        description=enrichment_data["description"],
+                    )
+
+                # Also update global enrichment fields (for backward compatibility)
                 self.graph_db.update_entity_enrichment(
                     entity_id=entity_id,
                     web_description=enrichment_data["description"],
@@ -387,7 +547,7 @@ Generate the name (no quotes, just the name):"""
                 )
         except Exception as e:
             # Silently fail enrichment - don't block tab processing
-            logger.warning(f"Failed to enrich entity '{entity_name}': {e}")
+            logger.warning(f"Failed to enrich entity '{entity_name}' for tab {tab.id}: {e}")
 
     def _update_cluster_shared_entities(self, cluster: TabCluster) -> None:
         """
@@ -490,7 +650,8 @@ Generate the name (no quotes, just the name):"""
         cluster.add_tab(tab)
 
         # Update centroid (eager evaluation - always recalculate)
-        cluster.update_centroid()
+        # Pass graph_db to enable entity-based centroids
+        cluster.update_centroid(graph_db=self.graph_db)
 
         # Update shared entities for the cluster
         self._update_cluster_shared_entities(cluster)
@@ -504,6 +665,22 @@ Generate the name (no quotes, just the name):"""
             cluster.name = new_name
             cluster.tabs_added_since_naming = 0  # Reset counter
             logger.info(f"Renamed cluster {cluster.id[:8]} to: {new_name}")
+
+    def remove_tab(self, tab_id: int) -> bool:
+        """
+        Remove a tab from its cluster.
+
+        Args:
+            tab_id: ID of the tab to remove
+
+        Returns:
+            True if tab was found and removed, False otherwise
+        """
+        # Find which cluster contains this tab
+        for cluster in self.clusters:
+            if any(tab.id == tab_id for tab in cluster.tabs):
+                return self.remove_tab_from_cluster(cluster, tab_id)
+        return False
 
     def remove_tab_from_cluster(self, cluster: TabCluster, tab_id: int) -> bool:
         """
@@ -528,7 +705,8 @@ Generate the name (no quotes, just the name):"""
 
         if removed:
             # Update centroid (eager evaluation)
-            cluster.update_centroid()
+            # Pass graph_db to enable entity-based centroids
+            cluster.update_centroid(graph_db=self.graph_db)
 
             # Update shared entities
             self._update_cluster_shared_entities(cluster)
@@ -634,7 +812,95 @@ Generate the name (no quotes, just the name):"""
             logger.info(f"Creating new cluster for tab '{tab.title}'")
             return self.create_new_cluster(tab)
 
-    def process_tabs_batch(self, tabs: list[Tab]) -> ClusteringResult:
+    def _enrich_entities_for_tabs(self, tabs: list[Tab]) -> list[dict]:
+        """
+        Extract and enrich unique entities from a batch of tabs.
+
+        This method:
+        1. Collects all unique entities across tabs
+        2. Batch checks which ones need enrichment (eliminating N+1 queries)
+        3. Enriches missing entities via You.com API
+        4. Stores enriched data in knowledge graph
+
+        Args:
+            tabs: List of tabs to extract entities from
+
+        Returns:
+            List of enrichment result dictionaries
+
+        Note:
+            This is a BLOCKING operation that makes external API calls.
+            For async/background enrichment, call this from a background task.
+        """
+        if not self.entity_enricher or not self.graph_db:
+            return []
+
+        # Collect all unique entities across all tabs
+        all_entity_names = set()
+        for tab in tabs:
+            if tab.entities:
+                all_entity_names.update(tab.entities)
+
+        if not all_entity_names:
+            return []
+
+        # Batch fetch existing entities (eliminates N+1 query pattern)
+        entity_names_list = list(all_entity_names)
+        existing_entities = self.graph_db.get_entities_by_names(entity_names_list)
+
+        # Filter to only enriched entities
+        enriched_names = {e.name for e in existing_entities if e.is_enriched}
+
+        # Determine which entities need enrichment
+        entities_needing_enrichment = [
+            name for name in entity_names_list
+            if name not in enriched_names
+        ]
+
+        if not entities_needing_enrichment:
+            logger.debug("All entities already enriched")
+            return []
+
+        # Enrich entities via You.com API
+        logger.info(f"Enriching {len(entities_needing_enrichment)} entities...")
+        enriched_data = self.entity_enricher.enrich_entities(entities_needing_enrichment)
+
+        # Batch generate embeddings for all entity names (1 API call!)
+        logger.info(f"Generating embeddings for {len(entities_needing_enrichment)} entity names...")
+        entity_embeddings_map = {}
+        try:
+            entity_embeddings = self.generate_embeddings_batch(entities_needing_enrichment)
+            entity_embeddings_map = dict(zip(entities_needing_enrichment, entity_embeddings))
+            logger.debug(f"Generated {len(entity_embeddings_map)} entity embeddings")
+        except Exception as e:
+            logger.warning(f"Failed to generate entity embeddings: {e}")
+            # Continue without embeddings (will use tab embeddings for centroid)
+
+        # Store enriched entities in knowledge graph (with embeddings)
+        stored_count = 0
+        for enrichment in enriched_data:
+            if enrichment.get("is_enriched"):
+                from kg_graph_search.graph.models import Entity
+
+                entity_name = enrichment["name"]
+                entity = Entity(
+                    name=entity_name,
+                    entity_type=enrichment["type"],
+                    description=None,  # Optional field, use web_description for actual content
+                    web_description=enrichment["description"],
+                    related_concepts=enrichment.get("related_concepts", []),
+                    source_url=enrichment.get("source_url"),
+                    is_enriched=True,
+                    enriched_at=datetime.now(UTC),
+                    embedding=entity_embeddings_map.get(entity_name),  # Add embedding
+                )
+                self.graph_db.add_entity(entity)
+                stored_count += 1
+
+        logger.info(f"Successfully enriched and stored {stored_count} entities with embeddings")
+        return enriched_data
+
+    def process_tabs_batch(self, tabs: list[Tab], skip_enrichment: bool = False) -> ClusteringResult:
         """
         Process multiple tabs in batch with optimized embedding generation.
 
@@ -643,6 +909,8 @@ Generate the name (no quotes, just the name):"""
 
         Args:
             tabs: List of tabs to cluster
+            skip_enrichment: If True, skip entity enrichment (for fast response).
+                Enrichment can be done later in a background task.
 
         Returns:
             ClusteringResult with clustering statistics
@@ -672,44 +940,11 @@ Generate the name (no quotes, just the name):"""
 
             logger.info(f"Batch extracted entities for {len(tabs_needing_entities)} tabs")
 
-        # Batch enrich entities if enricher is available
-        if self.entity_enricher and self.graph_db:
-            # Collect all unique entities across all tabs
-            all_entity_names = set()
-            for tab in tabs:
-                if tab.entities:
-                    all_entity_names.update(tab.entities)
-
-            # Filter to entities that need enrichment
-            entities_needing_enrichment = []
-            for entity_name in all_entity_names:
-                entity = self.graph_db.get_entity_by_name(entity_name)
-                if not entity or not entity.is_enriched:
-                    entities_needing_enrichment.append(entity_name)
-
-            # Enrich entities individually
-            if entities_needing_enrichment:
-                logger.info(f"Enriching {len(entities_needing_enrichment)} entities...")
-                enriched_data = self.entity_enricher.enrich_entities(entities_needing_enrichment)
-
-                # Store enriched entities in knowledge graph
-                for enrichment in enriched_data:
-                    if enrichment.get("is_enriched"):
-                        from kg_graph_search.graph.models import Entity
-
-                        entity = Entity(
-                            name=enrichment["name"],
-                            entity_type=enrichment["type"],
-                            description=None,  # Optional field, use web_description for actual content
-                            web_description=enrichment["description"],
-                            related_concepts=enrichment.get("related_concepts", []),
-                            source_url=enrichment.get("source_url"),
-                            is_enriched=True,
-                            enriched_at=datetime.now(UTC)
-                        )
-                        self.graph_db.add_entity(entity)
-
-                logger.info(f"Successfully enriched and stored {len(enriched_data)} entities")
+        # Enrich entities if enabled (BLOCKING - can take several seconds)
+        if not skip_enrichment:
+            self._enrich_entities_for_tabs(tabs)
+        else:
+            logger.debug("Skipping entity enrichment (skip_enrichment=True)")
 
         # Track which clusters were created during this batch
         clusters_before = set(c.id for c in self.clusters)
@@ -735,15 +970,30 @@ Generate the name (no quotes, just the name):"""
         clusters_after = set(c.id for c in self.clusters)
         new_cluster_ids = clusters_after - clusters_before
 
-        for cluster in self.clusters:
-            if cluster.id in new_cluster_ids and cluster.name == "New Cluster":
-                # Only name clusters with 2+ tabs (singletons won't be grouped anyway)
-                if cluster.tab_count >= 2:
-                    cluster.name = self.generate_cluster_name(cluster)
-                    cluster.tabs_added_since_naming = 0
-                    logger.info(f"Named new cluster: {cluster.name} (ID: {cluster.id[:8]})")
-                else:
-                    logger.debug(f"Skipped naming single-tab cluster (ID: {cluster.id[:8]})")
+        # Collect clusters that need naming (2+ tabs, unnamed)
+        clusters_to_name = [
+            c for c in self.clusters
+            if c.id in new_cluster_ids and c.name == "New Cluster" and c.tab_count >= 2
+        ]
+
+        if clusters_to_name:
+            # Batch name all clusters in a single API call (5x faster!)
+            logger.info(f"Batch naming {len(clusters_to_name)} clusters...")
+            names = self.generate_cluster_names_batch(clusters_to_name)
+
+            # Assign names back to clusters
+            for cluster, name in zip(clusters_to_name, names):
+                cluster.name = name
+                cluster.tabs_added_since_naming = 0
+                logger.info(f"Named new cluster: {cluster.name} (ID: {cluster.id[:8]})")
+
+        # Log skipped single-tab clusters
+        skipped_count = sum(
+            1 for c in self.clusters
+            if c.id in new_cluster_ids and c.name == "New Cluster" and c.tab_count < 2
+        )
+        if skipped_count > 0:
+            logger.debug(f"Skipped naming {skipped_count} single-tab cluster(s)")
 
         return ClusteringResult(
             clusters=self.clusters.copy(),

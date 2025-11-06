@@ -257,15 +257,23 @@ function initializeCytoscape() {
     }
   });
 
-  // Double-click on tab nodes - open URL in CURRENT tab
+  // Double-click on tab nodes - bring existing tab to front
   cy.on('dbltap', 'node[type="tab"]', (event) => {
     const node = event.target;
-    const url = node.data('url');
-    if (url) {
-      // Update current tab instead of creating new one
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) {
-          chrome.tabs.update(tabs[0].id, { url: url });
+    const tabId = parseInt(node.data('id').replace('tab_', ''));
+
+    if (tabId) {
+      // Activate the existing tab and bring it to front
+      chrome.tabs.update(tabId, { active: true }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('Error activating tab:', chrome.runtime.lastError);
+        } else {
+          // Also focus the window containing this tab
+          chrome.tabs.get(tabId, (tab) => {
+            if (tab && tab.windowId) {
+              chrome.windows.update(tab.windowId, { focused: true });
+            }
+          });
         }
       });
     }
@@ -273,6 +281,8 @@ function initializeCytoscape() {
 
   // Double-click on cluster nodes - collapse/expand cluster
   cy.on('dbltap', 'node[type="cluster"]', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const clusterNode = event.target;
     toggleClusterCollapse(clusterNode);
   });
@@ -297,6 +307,96 @@ function initializeCytoscape() {
   // Keyboard handlers
   document.addEventListener('keydown', (event) => {
     handleKeyDown(event);
+  });
+
+  // ============================================================================
+  // Rigid Drag Behavior for Clusters
+  // ============================================================================
+
+  // Store initial positions of all nodes when dragging starts
+  const dragStartPositions = new Map();
+
+  // When user starts dragging a cluster, record positions of cluster and all children
+  cy.on('grab', 'node[type="cluster"]', (event) => {
+    const cluster = event.target;
+    const clusterId = cluster.id();
+
+    console.log(`[DRAG] Grabbed cluster ${clusterId}`);
+
+    // Store cluster's initial position
+    dragStartPositions.set(clusterId, { ...cluster.position() });
+
+    // Get all tabs in this cluster
+    const tabs = cy.edges(`[source="${clusterId}"][type="contains"]`)
+      .map(edge => cy.getElementById(edge.data('target')));
+
+    // Store each tab's initial position
+    tabs.forEach(tab => {
+      dragStartPositions.set(tab.id(), { ...tab.position() });
+
+      // Get entities connected to this tab
+      const entities = cy.edges(`[source="${tab.id()}"][type="references"]`)
+        .map(edge => cy.getElementById(edge.data('target')));
+
+      // Store each entity's initial position
+      entities.forEach(entity => {
+        dragStartPositions.set(entity.id(), { ...entity.position() });
+      });
+    });
+
+    console.log(`[DRAG] Stored positions for ${dragStartPositions.size} nodes`);
+  });
+
+  // While dragging cluster, move all children by the same delta
+  cy.on('drag', 'node[type="cluster"]', (event) => {
+    const cluster = event.target;
+    const clusterId = cluster.id();
+
+    const startPos = dragStartPositions.get(clusterId);
+    if (!startPos) return;
+
+    const currentPos = cluster.position();
+
+    // Calculate delta (how far cluster has moved)
+    const dx = currentPos.x - startPos.x;
+    const dy = currentPos.y - startPos.y;
+
+    // Get all tabs in this cluster
+    const tabs = cy.edges(`[source="${clusterId}"][type="contains"]`)
+      .map(edge => cy.getElementById(edge.data('target')));
+
+    // Move each tab by the same delta (including hidden tabs)
+    tabs.forEach(tab => {
+      const tabStart = dragStartPositions.get(tab.id());
+      if (tabStart) {
+        tab.position({
+          x: tabStart.x + dx,
+          y: tabStart.y + dy
+        });
+      }
+
+      // Get entities connected to this tab
+      const entities = cy.edges(`[source="${tab.id()}"][type="references"]`)
+        .map(edge => cy.getElementById(edge.data('target')));
+
+      // Move each entity by the same delta (including hidden entities)
+      entities.forEach(entity => {
+        const entityStart = dragStartPositions.get(entity.id());
+        if (entityStart) {
+          entity.position({
+            x: entityStart.x + dx,
+            y: entityStart.y + dy
+          });
+        }
+      });
+    });
+  });
+
+  // Clean up stored positions when drag ends
+  cy.on('free', 'node[type="cluster"]', (event) => {
+    const cluster = event.target;
+    console.log(`[DRAG] Released cluster ${cluster.id()}`);
+    dragStartPositions.clear();
   });
 }
 
@@ -579,7 +679,7 @@ function updateStats(metadata) {
 }
 
 /**
- * Update legend to show cluster colors and names dynamically.
+ * Update legend to show cluster colors and tab counts dynamically.
  */
 function updateLegend() {
   if (!cy) return;
@@ -587,13 +687,13 @@ function updateLegend() {
   const legendContainer = document.querySelector('.legend');
   if (!legendContainer) return;
 
-  // Get all cluster nodes
-  const clusterNodes = cy.nodes('[type="cluster"]');
+  // Get all visible cluster nodes (not hidden)
+  const clusterNodes = cy.nodes('[type="cluster"]').not('.hidden');
 
   // Build legend HTML
-  let legendHTML = '<h4>Legend</h4>';
+  let legendHTML = '<h4>Clusters</h4>';
 
-  // Add cluster items if any exist
+  // Add cluster items with colors and tab counts
   if (clusterNodes.length > 0) {
     clusterNodes.forEach(node => {
       const color = node.data('color');
@@ -602,20 +702,18 @@ function updateLegend() {
 
       legendHTML += `
         <div class="legend-item">
-          <div class="legend-icon" style="background: ${escapeHtml(color)}; width: 35px; height: 35px; border: 3px solid #3a3a3a; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);"></div>
-          <span>${escapeHtml(label)} (${tabCount} tabs)</span>
+          <div class="legend-icon" style="background: ${escapeHtml(color)}; width: 35px; height: 35px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);"></div>
+          <span><strong>${escapeHtml(label)}</strong> (${tabCount} tabs)</span>
         </div>
       `;
     });
+  } else {
+    legendHTML += `
+      <div class="legend-item">
+        <span style="color: #999; font-style: italic;">No clusters to display</span>
+      </div>
+    `;
   }
-
-  // Add generic node type items
-  legendHTML += `
-    <div class="legend-item">
-      <div class="legend-icon entity"></div>
-      <span>Entity (concept)</span>
-    </div>
-  `;
 
   legendContainer.innerHTML = legendHTML;
 }
@@ -675,14 +773,11 @@ function showNodeInfo(node) {
         <strong>Tabs:</strong> ${data.tab_count || 0}
       </div>
       <div class="info-section">
-        <strong>Shared Entities:</strong>
-        <ul>
-          ${(data.shared_entities || []).map(e => `<li>${escapeHtml(e)}</li>`).join('')}
-        </ul>
-      </div>
-      <div class="info-section">
         <strong>Actions:</strong><br>
-        <small style="color: #999;">• Press Delete/Backspace to close all tabs in this group</small>
+        <small style="color: #999;">
+          • Double-click to collapse/expand group<br>
+          • Press Delete/Backspace to close all tabs in this group
+        </small>
       </div>
     `;
   } else if (data.type === 'tab') {
@@ -705,12 +800,6 @@ function showNodeInfo(node) {
         <strong>URL:</strong><br>
         <a href="${escapeHtml(data.url)}" target="_blank">${escapeHtml(data.url)}</a>
       </div>
-      <div class="info-section">
-        <strong>Entities:</strong>
-        <ul>
-          ${(data.entities || []).map(e => `<li>${escapeHtml(e)}</li>`).join('')}
-        </ul>
-      </div>
       ${data.opened_at ? `
       <div class="info-section">
         <strong>Opened:</strong> ${new Date(data.opened_at).toLocaleString()}
@@ -719,19 +808,51 @@ function showNodeInfo(node) {
       <div class="info-section">
         <strong>Actions:</strong><br>
         <small style="color: #999;">
-          • Double-click to open in new tab<br>
+          • Double-click to bring tab to front<br>
           • Press Delete/Backspace to close this tab
         </small>
       </div>
     `;
   } else if (data.type === 'entity') {
+    // Build description section based on available context
+    let descriptionHTML = '';
+
+    if (data.tab_contexts && Object.keys(data.tab_contexts).length > 0) {
+      // Show per-tab contextual descriptions
+      descriptionHTML = '<div class="info-section"><strong>Descriptions by Context:</strong></div>';
+
+      for (const [tabId, description] of Object.entries(data.tab_contexts)) {
+        // Get the tab node to show its title
+        const tabNode = cy.$(`#${tabId}`);
+        const tabTitle = tabNode.length > 0 ? tabNode.data('label') : tabId;
+
+        descriptionHTML += `
+          <div class="info-section" style="margin-left: 10px; border-left: 2px solid #B565E0; padding-left: 10px;">
+            <strong style="color: #B565E0; font-size: 11px;">In: ${escapeHtml(tabTitle)}</strong><br>
+            <span style="font-size: 13px;">${escapeHtml(description)}</span>
+          </div>
+        `;
+      }
+    } else if (data.description) {
+      // Fallback to legacy global description
+      descriptionHTML = `
+        <div class="info-section">
+          <strong>Description:</strong> ${escapeHtml(data.description)}
+        </div>
+      `;
+    } else {
+      descriptionHTML = `
+        <div class="info-section">
+          <strong>Description:</strong> <em style="color: #999;">No description available</em>
+        </div>
+      `;
+    }
+
     html = `
       <div class="info-section">
         <strong>Type:</strong> Entity (Concept)
       </div>
-      <div class="info-section">
-        <strong>Description:</strong> ${escapeHtml(data.description || 'N/A')}
-      </div>
+      ${descriptionHTML}
     `;
   }
 
@@ -800,28 +921,69 @@ function handleKeyDown(event) {
 /**
  * Close tabs by their IDs.
  */
-function closeTabsById(tabIds) {
-  // First, remove the nodes from the visualization immediately
-  const nodesToRemove = [];
-  tabIds.forEach(tabId => {
-    const nodeId = `tab_${tabId}`;
-    const node = cy.$(`#${nodeId}`);
-    if (node.length > 0) {
-      nodesToRemove.push(node);
+async function closeTabsById(tabIds) {
+  // First, call backend to delete tabs and orphaned entities
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/tabs/delete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        tab_ids: tabIds
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Backend delete failed: ${response.status}`);
     }
-  });
 
-  // Remove nodes and their connected edges
-  nodesToRemove.forEach(node => {
-    node.remove();
-  });
+    const deleteResult = await response.json();
+    console.log(`Backend deleted ${deleteResult.deleted_tabs} tabs and ${deleteResult.deleted_entities} entities`);
 
-  // Update stats and legend after removal
-  if (graphData && graphData.metadata) {
-    graphData.metadata.tab_count = (graphData.metadata.tab_count || 0) - nodesToRemove.length;
-    updateStats(graphData.metadata);
+    // Remove tab nodes from visualization
+    const nodesToRemove = [];
+    tabIds.forEach(tabId => {
+      const nodeId = `tab_${tabId}`;
+      const node = cy.$(`#${nodeId}`);
+      if (node.length > 0) {
+        nodesToRemove.push(node);
+      }
+    });
+
+    // Remove orphaned entity nodes from visualization
+    const orphanedEntityNodesToRemove = [];
+    deleteResult.orphaned_entity_ids.forEach(entityId => {
+      const nodeId = `entity_${entityId}`;
+      const node = cy.$(`#${nodeId}`);
+      if (node.length > 0) {
+        orphanedEntityNodesToRemove.push(node);
+      }
+    });
+
+    // Remove all nodes and their connected edges
+    nodesToRemove.forEach(node => {
+      node.remove();
+    });
+    orphanedEntityNodesToRemove.forEach(node => {
+      node.remove();
+    });
+
+    console.log(`Removed ${nodesToRemove.length} tab nodes and ${orphanedEntityNodesToRemove.length} orphaned entity nodes from visualization`);
+
+    // Update stats and legend after removal
+    if (graphData && graphData.metadata) {
+      graphData.metadata.tab_count = (graphData.metadata.tab_count || 0) - nodesToRemove.length;
+      graphData.metadata.entity_count = (graphData.metadata.entity_count || 0) - orphanedEntityNodesToRemove.length;
+      updateStats(graphData.metadata);
+    }
+    updateLegend();
+
+  } catch (error) {
+    console.error('Error deleting tabs from backend:', error);
+    alert('Failed to delete tabs from database. Please refresh.');
+    return;
   }
-  updateLegend();
 
   // Remove tabs via Chrome API
   chrome.tabs.remove(tabIds, () => {
@@ -878,27 +1040,67 @@ function showTabEntities(tabNode) {
 
 /**
  * Toggle cluster collapse state (hide/show tabs and entities).
+ *
+ * Handles multi-window clusters by collapsing/expanding Chrome tab groups
+ * in each window separately.
  */
-function toggleClusterCollapse(clusterNode) {
+async function toggleClusterCollapse(clusterNode) {
   if (!cy) return;
 
   const clusterId = clusterNode.id();
   const isCollapsed = clusterNode.hasClass('collapsed');
 
-  // Get Chrome tab group ID from first tab in this cluster
-  let chromeGroupId = null;
-  const firstEdge = cy.edges(`[source="${clusterId}"][type="contains"]`).first();
-  if (firstEdge.length > 0) {
-    const firstTab = cy.getElementById(firstEdge.data('target'));
-    chromeGroupId = firstTab.data('group_id');
+  console.log(`[COLLAPSE] Toggling cluster ${clusterId}, currently collapsed: ${isCollapsed}`);
+
+  // Get all tabs in this cluster
+  const clusterEdges = cy.edges(`[source="${clusterId}"][type="contains"]`);
+  const tabNodes = clusterEdges.map(edge => cy.getElementById(edge.data('target')));
+
+  console.log(`[COLLAPSE] Found ${tabNodes.length} tabs in cluster`);
+
+  // Group tabs by window_id and their Chrome group_id
+  const groupsByWindow = new Map(); // Map<window_id, chrome_group_id>
+
+  // First, try to use stored group_id from node data
+  tabNodes.forEach(tabNode => {
+    const windowId = tabNode.data('window_id');
+    const groupId = tabNode.data('group_id');
+
+    console.log(`[COLLAPSE] Tab ${tabNode.id()}: window_id=${windowId}, group_id=${groupId}`);
+
+    // Only track if we have both window_id and group_id
+    if (windowId && groupId) {
+      groupsByWindow.set(windowId, groupId);
+    }
+  });
+
+  // If no groups found from node data, query Chrome API directly
+  if (groupsByWindow.size === 0) {
+    console.log(`[COLLAPSE] No group_id data found, querying Chrome API...`);
+
+    for (const tabNode of tabNodes) {
+      const tabId = parseInt(tabNode.data('id').replace('tab_', ''));
+
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+          groupsByWindow.set(tab.windowId, tab.groupId);
+          console.log(`[COLLAPSE] Found tab ${tabId} in group ${tab.groupId}, window ${tab.windowId}`);
+        }
+      } catch (error) {
+        console.warn(`[COLLAPSE] Could not get tab ${tabId}:`, error);
+      }
+    }
   }
+
+  console.log(`[COLLAPSE] Found ${groupsByWindow.size} Chrome groups to toggle`);
 
   if (isCollapsed) {
     // Expand: Show tabs and their entities
     clusterNode.removeClass('collapsed');
 
     // Show tabs
-    cy.edges(`[source="${clusterId}"][type="contains"]`).forEach(edge => {
+    clusterEdges.forEach(edge => {
       const tabNode = cy.getElementById(edge.data('target'));
       tabNode.removeClass('hidden');
       edge.removeClass('hidden');
@@ -907,22 +1109,23 @@ function toggleClusterCollapse(clusterNode) {
       // Don't automatically show entities on expand
     });
 
-    // Expand Chrome tab group
-    if (chromeGroupId) {
-      chrome.tabGroups.update(chromeGroupId, { collapsed: false }, () => {
+    // Expand Chrome tab groups (one per window)
+    groupsByWindow.forEach((groupId, windowId) => {
+      console.log(`[COLLAPSE] Expanding Chrome tab group ${groupId} in window ${windowId}`);
+      chrome.tabGroups.update(groupId, { collapsed: false }, () => {
         if (chrome.runtime.lastError) {
-          console.error('Error expanding Chrome tab group:', chrome.runtime.lastError);
+          console.error(`Error expanding Chrome tab group ${groupId} in window ${windowId}:`, chrome.runtime.lastError);
         } else {
-          console.log(`Expanded Chrome tab group ${chromeGroupId}`);
+          console.log(`✅ Expanded Chrome tab group ${groupId} in window ${windowId}`);
         }
       });
-    }
+    });
   } else {
     // Collapse: Hide tabs and their entities
     clusterNode.addClass('collapsed');
 
     // Hide tabs
-    cy.edges(`[source="${clusterId}"][type="contains"]`).forEach(edge => {
+    clusterEdges.forEach(edge => {
       const tabNode = cy.getElementById(edge.data('target'));
       tabNode.addClass('hidden');
       edge.addClass('hidden');
@@ -935,16 +1138,17 @@ function toggleClusterCollapse(clusterNode) {
       });
     });
 
-    // Collapse Chrome tab group
-    if (chromeGroupId) {
-      chrome.tabGroups.update(chromeGroupId, { collapsed: true }, () => {
+    // Collapse Chrome tab groups (one per window)
+    groupsByWindow.forEach((groupId, windowId) => {
+      console.log(`[COLLAPSE] Collapsing Chrome tab group ${groupId} in window ${windowId}`);
+      chrome.tabGroups.update(groupId, { collapsed: true }, () => {
         if (chrome.runtime.lastError) {
-          console.error('Error collapsing Chrome tab group:', chrome.runtime.lastError);
+          console.error(`Error collapsing Chrome tab group ${groupId} in window ${windowId}:`, chrome.runtime.lastError);
         } else {
-          console.log(`Collapsed Chrome tab group ${chromeGroupId}`);
+          console.log(`✅ Collapsed Chrome tab group ${groupId} in window ${windowId}`);
         }
       });
-    }
+    });
   }
 }
 

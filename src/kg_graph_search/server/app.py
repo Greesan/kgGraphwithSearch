@@ -11,18 +11,22 @@ This server provides endpoints for:
 import uuid
 from datetime import datetime, UTC, timedelta
 from pathlib import Path
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 from kg_graph_search.config import get_logger, get_settings
 from kg_graph_search.agents.models import Tab
 from kg_graph_search.agents.tab_clusterer import TabClusterer
 from kg_graph_search.graph.database import KnowledgeGraphDB
+from kg_graph_search.agents.entity_enricher import EntityEnricher
+from kg_graph_search.search.you_client import YouAPIClient
 
 logger = get_logger(__name__)
 from kg_graph_search.server.models import (
     TabsIngestRequest,
     TabsIngestResponse,
+    TabsDeleteRequest,
+    TabsDeleteResponse,
     TabsClustersResponse,
     RecommendationsResponse,
     HealthResponse,
@@ -95,6 +99,124 @@ def get_clusterer() -> TabClusterer:
 
 
 # ============================================================================
+# Background Tasks
+# ============================================================================
+
+
+def enrich_entities_in_background(
+    entity_names: list[str],
+    db_path: Path,
+    you_api_key: str,
+) -> None:
+    """
+    Enrich entities in a background thread with thread-local resources.
+
+    This function creates its own database connection and API clients to avoid
+    SQLite thread-safety issues and resource sharing conflicts.
+
+    Args:
+        entity_names: List of entity names to enrich
+        db_path: Path to SQLite database
+        you_api_key: You.com API key
+
+    Note:
+        This runs in a separate thread via FastAPI BackgroundTasks.
+        All resources are thread-local and cleaned up after completion.
+    """
+    if not entity_names:
+        logger.debug("No entities to enrich in background")
+        return
+
+    logger.info(f"Background enrichment started for {len(entity_names)} entities")
+
+    # Create thread-local database connection (SQLite requirement)
+    graph_db = None
+    you_client = None
+    enricher = None
+
+    try:
+        # Initialize thread-local resources
+        graph_db = KnowledgeGraphDB(db_path)
+        you_client = YouAPIClient(you_api_key)
+        enricher = EntityEnricher(you_client, cache_ttl_days=7)
+
+        # Batch fetch to check which entities actually need enrichment
+        # (Avoid duplicate work if multiple requests came in)
+        existing_entities = graph_db.get_entities_by_names(entity_names)
+        enriched_names = {e.name for e in existing_entities if e.is_enriched}
+
+        # Filter to only unenriched entities
+        entities_to_enrich = [
+            name for name in entity_names
+            if name not in enriched_names
+        ]
+
+        if not entities_to_enrich:
+            logger.info("Background enrichment: All entities already enriched")
+            return
+
+        logger.info(f"Background enrichment: Enriching {len(entities_to_enrich)} new entities")
+
+        # Enrich entities (includes retry logic from EntityEnricher)
+        enriched_data = enricher.enrich_entities(entities_to_enrich)
+
+        # Batch generate embeddings for entity names (1 API call!)
+        from openai import OpenAI
+        settings = get_settings()
+        openai_client = OpenAI(api_key=settings.openai_api_key)
+
+        logger.info(f"Generating embeddings for {len(entities_to_enrich)} entity names...")
+        entity_embeddings_map = {}
+        try:
+            response = openai_client.embeddings.create(
+                model=settings.openai_embedding_model,
+                input=entities_to_enrich
+            )
+            embeddings = [data.embedding for data in response.data]
+            entity_embeddings_map = dict(zip(entities_to_enrich, embeddings))
+            logger.debug(f"Generated {len(entity_embeddings_map)} entity embeddings")
+        except Exception as e:
+            logger.warning(f"Failed to generate entity embeddings in background: {e}")
+            # Continue without embeddings
+
+        # Store enriched entities in database (with embeddings)
+        from kg_graph_search.graph.models import Entity
+
+        stored_count = 0
+        for enrichment in enriched_data:
+            if enrichment.get("is_enriched"):
+                entity_name = enrichment["name"]
+                entity = Entity(
+                    name=entity_name,
+                    entity_type=enrichment["type"],
+                    description=None,
+                    web_description=enrichment["description"],
+                    related_concepts=enrichment.get("related_concepts", []),
+                    source_url=enrichment.get("source_url"),
+                    is_enriched=True,
+                    enriched_at=datetime.now(UTC),
+                    embedding=entity_embeddings_map.get(entity_name),  # Add embedding
+                )
+                graph_db.add_entity(entity)
+                stored_count += 1
+
+        logger.info(f"Background enrichment completed: {stored_count}/{len(entities_to_enrich)} entities stored with embeddings")
+
+    except Exception as e:
+        logger.error(
+            f"Background enrichment failed: {e}",
+            exc_info=True,
+            extra={"entity_count": len(entity_names)}
+        )
+    finally:
+        # Clean up thread-local resources
+        if you_client:
+            you_client.close()
+        if graph_db:
+            graph_db.close()
+
+
+# ============================================================================
 # API Endpoints
 # ============================================================================
 
@@ -109,30 +231,36 @@ async def health_check():
 
 
 @app.post("/api/tabs/ingest", response_model=TabsIngestResponse)
-async def ingest_tabs(request: TabsIngestRequest):
+async def ingest_tabs(request: TabsIngestRequest, background_tasks: BackgroundTasks):
     """
     Ingest tabs from browser extension for analysis and clustering.
 
     This endpoint:
-    1. Receives tab metadata from the extension
-    2. Generates embeddings for ALL tabs in one batch API call (10x faster!)
-    3. Assigns tabs to clusters or creates new ones
-    4. Returns processing summary
+    1. Receives tab metadata from the extension (GROUND TRUTH from browser)
+    2. Reconciles database with browser state (marks closed tabs as inactive)
+    3. Generates embeddings for ALL tabs in one batch API call (10x faster!)
+    4. Assigns tabs to clusters or creates new ones (FAST - skips enrichment)
+    5. Cleans up orphaned entities from closed tabs
+    6. Queues entity enrichment for background processing (non-blocking)
 
     Args:
         request: Tab data with metadata
+        background_tasks: FastAPI background tasks for async enrichment
 
     Returns:
-        Processing summary with session ID
+        Processing summary with session ID (returns quickly, enrichment happens in background)
     """
     clusterer = get_clusterer()
+    graph_db = get_graph_db()
 
     important_count = 0
     tabs = []
+    cache_hits = 0
+    cache_misses = 0
 
     # Convert input tabs to internal Tab model
     for tab_input in request.tabs:
-        # Create Tab model
+        # Create Tab model (use cached data if available)
         tab = Tab(
             id=tab_input.id,
             url=tab_input.url,
@@ -140,7 +268,15 @@ async def ingest_tabs(request: TabsIngestRequest):
             favicon_url=tab_input.favicon_url,
             window_id=tab_input.window_id,
             group_id=tab_input.group_id,
+            embedding=tab_input.embedding,  # From browser cache
+            entities=tab_input.entities,     # From browser cache
         )
+
+        # Track cache hits/misses
+        if tab_input.embedding and tab_input.entities:
+            cache_hits += 1
+        else:
+            cache_misses += 1
 
         # Count important tabs
         if tab_input.important:
@@ -148,14 +284,115 @@ async def ingest_tabs(request: TabsIngestRequest):
 
         tabs.append(tab)
 
-    # Process all tabs in batch (generates embeddings in single API call)
-    clusterer.process_tabs_batch(tabs)
+    logger.info(f"Cache stats: {cache_hits} hits, {cache_misses} misses")
+
+    # RECONCILIATION: Browser tabs are ground truth
+    # Mark any tabs in DB that are NOT in the browser as closed
+    active_tab_ids = {tab.id for tab in tabs}
+    db_active_tabs = graph_db.get_active_tabs()
+
+    closed_count = 0
+    for db_tab in db_active_tabs:
+        if db_tab['id'] not in active_tab_ids:
+            # Tab was closed in browser but still active in DB
+            logger.info(f"Tab {db_tab['id']} closed in browser, marking as inactive: {db_tab['title']}")
+            graph_db.close_tab(db_tab['id'])
+            clusterer.remove_tab(db_tab['id'])
+            closed_count += 1
+
+    # Clean up orphaned entities after removing closed tabs
+    orphaned_count = 0
+    if closed_count > 0:
+        orphaned_count = graph_db.remove_orphaned_entities()
+        logger.info(f"Reconciliation: Marked {closed_count} tabs as closed, removed {orphaned_count} orphaned entities")
+
+    # Process all tabs in batch (FAST - skips enrichment for quick response)
+    clusterer.process_tabs_batch(tabs, skip_enrichment=True)
+
+    # Queue entity enrichment for background processing
+    settings = get_settings()
+    if settings.enable_background_enrichment:
+        # Collect all unique entity names from processed tabs
+        all_entity_names = set()
+        for tab in tabs:
+            if tab.entities:
+                all_entity_names.update(tab.entities)
+
+        if all_entity_names:
+            entity_names_list = list(all_entity_names)
+            logger.info(f"Queuing {len(entity_names_list)} entities for background enrichment")
+
+            # Add background task (runs in thread pool after response is sent)
+            background_tasks.add_task(
+                enrich_entities_in_background,
+                entity_names=entity_names_list,
+                db_path=settings.db_path,
+                you_api_key=settings.you_api_key,
+            )
+        else:
+            logger.debug("No entities to enrich in background")
+    else:
+        logger.debug("Background enrichment disabled in settings")
+
+    # Return tab data for browser caching (embeddings + entities)
+    from kg_graph_search.server.models import TabDataResponse
+    tab_data_for_cache = [
+        TabDataResponse(
+            id=tab.id,
+            embedding=tab.embedding,
+            entities=tab.entities
+        )
+        for tab in tabs
+        if tab.embedding and tab.entities  # Only return successfully processed tabs
+    ]
 
     return TabsIngestResponse(
         status="success",
         processed=len(request.tabs),
         important_tabs=important_count,
         session_id=_session_id,
+        tab_data=tab_data_for_cache,  # Data for browser to cache
+    )
+
+
+@app.post("/api/tabs/delete", response_model=TabsDeleteResponse)
+async def delete_tabs(request: TabsDeleteRequest):
+    """
+    Delete tabs from the database and remove orphaned entities.
+
+    This endpoint:
+    1. Deletes tabs from the database
+    2. Removes tab-entity relationships (via CASCADE)
+    3. Identifies entities that are now orphaned (no tab connections)
+    4. Deletes orphaned entities and their relationships from the database
+
+    Args:
+        request: Tab IDs to delete
+
+    Returns:
+        Summary of deleted tabs and entities
+    """
+    graph_db = get_graph_db()
+    clusterer = get_clusterer()
+
+    deleted_count = 0
+
+    # Remove each tab from clusterer (which also deletes from DB)
+    for tab_id in request.tab_ids:
+        if clusterer.remove_tab(tab_id):
+            deleted_count += 1
+
+    # Find and remove orphaned entities
+    orphaned_entity_ids = graph_db.get_orphaned_entities()
+    deleted_entities = graph_db.remove_orphaned_entities()
+
+    logger.info(f"Deleted {deleted_count} tabs and {deleted_entities} orphaned entities")
+
+    return TabsDeleteResponse(
+        status="success",
+        deleted_tabs=deleted_count,
+        deleted_entities=deleted_entities,
+        orphaned_entity_ids=orphaned_entity_ids,
     )
 
 
@@ -330,6 +567,7 @@ async def get_graph_visualization(
     Returns:
         Cytoscape.js-compatible graph data
     """
+    graph_db = get_graph_db()
     clusterer = get_clusterer()
     clusters = clusterer.get_all_clusters()
 
@@ -380,6 +618,10 @@ async def get_graph_visualization(
         for tab in cluster.tabs:
             tab_id = f"tab_{tab.id}"
 
+            # Get tab summary from database if available
+            tab_data = graph_db.get_tab(tab.id) if graph_db else None
+            tab_summary = tab_data.get("summary") if tab_data else None
+
             tab_node = GraphNode(
                 data=GraphNodeData(
                     id=tab_id,
@@ -390,9 +632,12 @@ async def get_graph_visualization(
                     cluster_id=cluster_id,  # Custom field for entity view
                     color=cluster.color.value,  # Store cluster color
                     url=tab.url,
+                    summary=tab_summary,  # AI-generated summary
                     important=tab.important,
                     entities=tab.entities,
                     opened_at=tab.created_at.isoformat() if tab.created_at else None,
+                    window_id=tab.window_id,  # Browser window ID
+                    group_id=tab.group_id,  # Chrome tab group ID
                 )
             )
             nodes.append(tab_node)
@@ -428,17 +673,25 @@ async def get_graph_visualization(
         entity = graph_db.get_entity_by_name(entity_name)
         entity_id = f"entity_{entity.id}" if entity else f"entity_{hash(entity_name) % 100000}"
 
+        # Get all per-tab contextual descriptions for this entity
+        tab_contexts = {}
+        if entity and entity.id:
+            all_contexts = graph_db.get_all_entity_tab_contexts(entity.id)
+            # Map from tab string IDs (e.g., "tab_123") to descriptions
+            tab_contexts = {f"tab_{tab_id}": desc for tab_id, desc in all_contexts.items()}
+
         entity_node = GraphNode(
             data=GraphNodeData(
                 id=entity_id,
                 type="entity",
                 label=entity_name,
                 description=entity.web_description if entity and entity.web_description else None,
+                tab_contexts=tab_contexts,  # Per-tab descriptions {tab_id: description}
                 cluster_ids=list(entity_info["cluster_ids"]),
             )
         )
         nodes.append(entity_node)
-        logger.debug(f"Added entity node: {entity_name} ({entity_id})")
+        logger.debug(f"Added entity node: {entity_name} ({entity_id}) with {len(tab_contexts)} tab contexts")
 
         # Add edges from tabs to this entity
         for tab_id in entity_info["tab_ids"]:
@@ -511,3 +764,155 @@ async def get_graph_visualization(
         timestamp=datetime.now(UTC).isoformat(),
         metadata=metadata,
     )
+
+
+@app.post("/api/entities/re-enrich")
+async def re_enrich_entities(
+    background_tasks: BackgroundTasks,
+    force: bool = Query(default=False, description="Force re-enrichment even if already enriched")
+):
+    """
+    Trigger re-enrichment of all entities with context-aware descriptions.
+
+    This endpoint will regenerate descriptions for all (entity, tab) pairs
+    using the new context-aware enrichment logic.
+
+    Args:
+        force: If true, re-enrich all entities. If false, only enrich missing contexts.
+        background_tasks: FastAPI background tasks for async processing
+
+    Returns:
+        Status message with count of entities queued for enrichment
+    """
+    graph_db = get_graph_db()
+
+    # Get all entity-tab pairs that need enrichment
+    cursor = graph_db.conn.cursor()
+
+    if force:
+        # Get all entity-tab pairs
+        cursor.execute("""
+            SELECT DISTINCT te.entity_id, te.tab_id, e.name, t.url, t.title
+            FROM tab_entities te
+            JOIN entities e ON te.entity_id = e.id
+            JOIN tabs t ON te.tab_id = t.id
+            WHERE t.is_active = 1
+        """)
+    else:
+        # Only get pairs that don't have a context yet
+        cursor.execute("""
+            SELECT DISTINCT te.entity_id, te.tab_id, e.name, t.url, t.title
+            FROM tab_entities te
+            JOIN entities e ON te.entity_id = e.id
+            JOIN tabs t ON te.tab_id = t.id
+            LEFT JOIN entity_tab_contexts etc
+                ON etc.entity_id = te.entity_id AND etc.tab_id = te.tab_id
+            WHERE t.is_active = 1 AND etc.entity_id IS NULL
+        """)
+
+    pairs = cursor.fetchall()
+    entity_names = [row["name"] for row in pairs]
+
+    if not entity_names:
+        return {
+            "status": "success",
+            "message": "No entities need re-enrichment",
+            "queued_count": 0
+        }
+
+    # Trigger background enrichment
+    background_tasks.add_task(
+        _background_re_enrich_entities,
+        pairs=list(pairs),
+        db_path=graph_db.db_path,
+        you_api_key=get_settings().you_api_key
+    )
+
+    logger.info(f"Queued {len(pairs)} entity-tab pairs for re-enrichment")
+
+    return {
+        "status": "success",
+        "message": f"Queued {len(pairs)} entity-tab pairs for background enrichment",
+        "queued_count": len(pairs)
+    }
+
+
+def _background_re_enrich_entities(
+    pairs: list,
+    db_path: Path,
+    you_api_key: str
+):
+    """
+    Background task to re-enrich entities with context-aware descriptions.
+
+    Args:
+        pairs: List of (entity_id, tab_id, name, url, title) tuples
+        db_path: Path to database
+        you_api_key: You.com API key
+    """
+    try:
+        # Initialize thread-local resources
+        graph_db = KnowledgeGraphDB(db_path)
+        you_client = YouAPIClient(you_api_key)
+        enricher = EntityEnricher(you_client, cache_ttl_days=7)
+
+        success_count = 0
+        fail_count = 0
+
+        for row in pairs:
+            entity_id = row["entity_id"]
+            tab_id = row["tab_id"]
+            entity_name = row["name"]
+            tab_url = row["url"]
+            tab_title = row["title"]
+
+            try:
+                # Get tab summary and related entities
+                tab_data = graph_db.get_tab(tab_id)
+                tab_summary = tab_data.get("summary") if tab_data else None
+
+                # Get related entities from this tab
+                tab_entities = graph_db.get_entities_for_tab(tab_id)
+                related_entities = [e.name for e in tab_entities if e.name != entity_name]
+
+                # Enrich with context
+                enrichment_data = enricher.enrich_entity(
+                    entity_name=entity_name,
+                    tab_id=tab_id,
+                    tab_url=tab_url,
+                    tab_title=tab_title,
+                    tab_summary=tab_summary,
+                    related_entities=related_entities,
+                )
+
+                if enrichment_data["is_enriched"] and enrichment_data.get("description"):
+                    # Save per-tab context
+                    graph_db.save_entity_tab_context(
+                        entity_id=entity_id,
+                        tab_id=tab_id,
+                        description=enrichment_data["description"],
+                    )
+
+                    # Also update global enrichment
+                    graph_db.update_entity_enrichment(
+                        entity_id=entity_id,
+                        web_description=enrichment_data["description"],
+                        entity_type=enrichment_data["type"],
+                        related_concepts=enrichment_data["related_concepts"],
+                        source_url=enrichment_data["source_url"],
+                    )
+
+                    success_count += 1
+                    logger.info(f"Re-enriched entity '{entity_name}' for tab {tab_id}")
+                else:
+                    fail_count += 1
+                    logger.warning(f"Failed to re-enrich entity '{entity_name}' for tab {tab_id}")
+
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"Error re-enriching entity '{entity_name}' for tab {tab_id}: {e}")
+
+        logger.info(f"Re-enrichment complete: {success_count} succeeded, {fail_count} failed")
+
+    except Exception as e:
+        logger.error(f"Background re-enrichment failed: {e}", exc_info=True)

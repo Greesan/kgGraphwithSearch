@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Entity Enrichment Configuration
+    enable_background_enrichment: bool = True
+    enrichment_batch_size: int = 20
+    enrichment_timeout_seconds: float = 30.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

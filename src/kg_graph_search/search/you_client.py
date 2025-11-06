@@ -309,6 +309,51 @@ class YouAPIClient:
         response.raise_for_status()
         return response.json()
 
+    def generate_tab_summary(
+        self,
+        title: str,
+        url: str,
+    ) -> Optional[str]:
+        """
+        Generate a 2-3 sentence summary of a webpage using Express Agent.
+
+        Args:
+            title: The title of the webpage
+            url: The URL of the webpage
+
+        Returns:
+            Summary string or None if generation fails
+
+        Example:
+            >>> client.generate_tab_summary(
+            ...     title="GPT-5 API Reference",
+            ...     url="https://platform.openai.com/docs/api-reference/chat"
+            ... )
+            "This page documents the OpenAI Chat Completions API..."
+        """
+        try:
+            prompt = f"""Summarize this webpage in 2-3 concise sentences. Focus on the main topic and key concepts.
+
+Title: {title}
+URL: {url}
+
+Provide only the summary, no additional commentary."""
+
+            response = self.express_agent_search(prompt)
+
+            # Parse agent response
+            for output in response.get("output", []):
+                if output.get("type") in ["message.answer", "chat_node.answer"]:
+                    summary = output.get("text", "").strip()
+                    if summary:
+                        return summary[:500]  # Limit length
+
+            return None
+
+        except Exception as e:
+            # Fail silently - tab can exist without summary
+            return None
+
     def close(self):
         """Close the HTTP clients."""
         self.client.close()

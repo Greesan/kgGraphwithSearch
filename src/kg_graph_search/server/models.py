@@ -24,6 +24,10 @@ class TabInput(BaseModel):
     window_id: Optional[int] = None
     group_id: Optional[int] = None
 
+    # Cached data from browser extension (performance optimization)
+    embedding: Optional[list[float]] = None  # Cached embedding vector
+    entities: Optional[list[str]] = None     # Cached extracted entities
+
 
 class TabsIngestRequest(BaseModel):
     """Request model for /api/tabs/ingest endpoint."""
@@ -32,9 +36,23 @@ class TabsIngestRequest(BaseModel):
     timestamp: str  # ISO format timestamp
 
 
+class TabsDeleteRequest(BaseModel):
+    """Request model for /api/tabs/delete endpoint."""
+
+    tab_ids: list[int]
+
+
 # ============================================================================
 # Response Models
 # ============================================================================
+
+
+class TabDataResponse(BaseModel):
+    """Response data for a single tab (for browser caching)."""
+
+    id: int
+    embedding: Optional[list[float]] = None
+    entities: Optional[list[str]] = None
 
 
 class TabsIngestResponse(BaseModel):
@@ -44,6 +62,16 @@ class TabsIngestResponse(BaseModel):
     processed: int
     important_tabs: int = 0
     session_id: str
+    tab_data: list[TabDataResponse] = Field(default_factory=list)  # Data for browser to cache
+
+
+class TabsDeleteResponse(BaseModel):
+    """Response model for /api/tabs/delete endpoint."""
+
+    status: str
+    deleted_tabs: int
+    deleted_entities: int
+    orphaned_entity_ids: list[int] = Field(default_factory=list)
 
 
 class TabResponse(BaseModel):
@@ -126,12 +154,14 @@ class GraphNodeData(BaseModel):
     color: Optional[str] = None
     cluster_id: Optional[str] = None  # For tabs - which cluster they belong to (NOT parent, to avoid compound nodes)
     url: Optional[str] = None  # For tabs
+    summary: Optional[str] = None  # For tabs - AI-generated summary
     important: Optional[bool] = None  # For tabs
     entities: Optional[list[str]] = None  # For tabs
     opened_at: Optional[str] = None  # For tabs
     tab_count: Optional[int] = None  # For clusters
     shared_entities: Optional[list[str]] = None  # For clusters
-    description: Optional[str] = None  # For entities
+    description: Optional[str] = None  # For entities - legacy global description
+    tab_contexts: Optional[dict[str, str]] = None  # For entities - per-tab descriptions {tab_id: description}
     cluster_ids: Optional[list[str]] = None  # For entities - which clusters reference this entity
 
 

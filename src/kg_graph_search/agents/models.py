@@ -8,7 +8,7 @@ tab clusters, and their relationships within the TabGraph system.
 from datetime import datetime, UTC
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 import numpy as np
 
 
@@ -20,6 +20,7 @@ class Tab(BaseModel):
         url: The URL of the tab
         title: The title of the tab
         favicon_url: URL to the tab's favicon
+        summary: AI-generated 2-3 sentence summary of tab content
         entities: List of extracted entities from the tab content
         embedding: Vector embedding of the tab content (from text-embedding-3-small)
         created_at: When the tab was created/opened
@@ -33,6 +34,7 @@ class Tab(BaseModel):
     url: str
     title: str
     favicon_url: Optional[str] = None
+    summary: Optional[str] = None
     entities: list[str] = Field(default_factory=list)
     embedding: Optional[list[float]] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -42,6 +44,12 @@ class Tab(BaseModel):
     important: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator('entities', mode='before')
+    @classmethod
+    def convert_none_to_empty_list(cls, v):
+        """Convert None to empty list for entities field."""
+        return v if v is not None else []
 
 
 class ClusterColor(str, Enum):
@@ -92,12 +100,13 @@ class TabCluster(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def update_centroid(self) -> None:
+    def update_centroid(self, graph_db=None) -> None:
         """Recalculate the centroid embedding based on current tabs.
 
-        This method computes the mean of all tab embeddings in the cluster.
-        It's called whenever tabs are added or removed to ensure the centroid
-        accurately represents the current cluster composition.
+        Prefers entity embeddings (cleaner signal) when available, falls back to tab embeddings.
+
+        Args:
+            graph_db: Optional KnowledgeGraphDB to fetch entity embeddings
 
         Note: This implementation uses eager evaluation. For lazy evaluation,
         see the property-based approach in TabClusterer.
@@ -107,17 +116,50 @@ class TabCluster(BaseModel):
             self._centroid_dirty = False
             return
 
-        # Filter out tabs without embeddings
-        embeddings = [tab.embedding for tab in self.tabs if tab.embedding is not None]
+        # Strategy 1: Try entity-based centroid (cleaner, more stable)
+        if graph_db:
+            entity_embeddings = self._get_entity_embeddings(graph_db)
+            if entity_embeddings:
+                self.centroid_embedding = np.mean(entity_embeddings, axis=0).tolist()
+                self._centroid_dirty = False
+                return
 
-        if not embeddings:
-            self.centroid_embedding = None
+        # Strategy 2: Fall back to tab embeddings (original behavior)
+        tab_embeddings = [tab.embedding for tab in self.tabs if tab.embedding is not None]
+        if tab_embeddings:
+            self.centroid_embedding = np.mean(tab_embeddings, axis=0).tolist()
             self._centroid_dirty = False
             return
 
-        # Calculate mean embedding
-        self.centroid_embedding = np.mean(embeddings, axis=0).tolist()
+        # Strategy 3: No embeddings available
+        self.centroid_embedding = None
         self._centroid_dirty = False
+
+    def _get_entity_embeddings(self, graph_db) -> list[list[float]]:
+        """Get cached entity embeddings for all entities in this cluster.
+
+        Args:
+            graph_db: KnowledgeGraphDB instance
+
+        Returns:
+            List of entity embedding vectors (empty if none available)
+        """
+        # Collect unique entity names across all tabs
+        all_entity_names = set()
+        for tab in self.tabs:
+            if tab.entities:
+                all_entity_names.update(tab.entities)
+
+        if not all_entity_names:
+            return []
+
+        # Batch fetch entities from DB (with embeddings)
+        entities = graph_db.get_entities_by_names(list(all_entity_names))
+
+        # Extract embeddings (only from entities that have them)
+        entity_embeddings = [e.embedding for e in entities if e.embedding is not None]
+
+        return entity_embeddings
 
     def should_regenerate_name(self, threshold: int = 3) -> bool:
         """Determine if cluster name should be regenerated.
@@ -144,9 +186,16 @@ class TabCluster(BaseModel):
     def add_tab(self, tab: Tab) -> None:
         """Add a tab to the cluster and mark centroid as dirty.
 
+        This method is idempotent - calling it multiple times with the same
+        tab ID will not create duplicates.
+
         Args:
             tab: The tab to add to this cluster
         """
+        # Check if tab already exists in cluster (prevents duplicates on re-sync)
+        if any(t.id == tab.id for t in self.tabs):
+            return
+
         self.tabs.append(tab)
         self.tab_count += 1
         self.tabs_added_since_naming += 1
