@@ -387,4 +387,29 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+// ============================================================================
+// Tab Group State Sync (Two-Way Sync)
+// ============================================================================
+
+/**
+ * Listen for Chrome tab group state changes (collapse/expand).
+ * When user manually collapses a Chrome tab group, notify the visualization
+ * so it can sync its cluster collapse state.
+ */
+chrome.tabGroups.onUpdated.addListener(async (group) => {
+  console.log(`[TAB GROUP SYNC] Group ${group.id} updated: collapsed=${group.collapsed}`);
+
+  // Notify any open visualization windows about this group state change
+  chrome.runtime.sendMessage({
+    action: 'tab-group-updated',
+    groupId: group.id,
+    collapsed: group.collapsed,
+    title: group.title,
+    color: group.color
+  }).catch((error) => {
+    // Silently fail if no visualization is open to receive the message
+    // This is expected when viz window is closed
+  });
+});
+
 console.log('TabGraph background service worker loaded');

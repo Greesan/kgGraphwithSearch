@@ -398,6 +398,17 @@ function initializeCytoscape() {
     console.log(`[DRAG] Released cluster ${cluster.id()}`);
     dragStartPositions.clear();
   });
+
+  // ============================================================================
+  // Two-Way Sync: Listen for Chrome Tab Group State Changes
+  // ============================================================================
+
+  // Listen for messages from background script about Chrome tab group changes
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'tab-group-updated') {
+      handleChromeGroupStateChange(message.groupId, message.collapsed);
+    }
+  });
 }
 
 // ============================================================================
@@ -875,6 +886,26 @@ function closeInfoPanel() {
  * Handle keyboard events for graph interactions.
  */
 function handleKeyDown(event) {
+  // Escape - deselect all nodes and clear UI state
+  if (event.key === 'Escape') {
+    cy.$(':selected').unselect();
+    closeInfoPanel();
+
+    // Also clear entity view dimming if active
+    if (currentView === 'entity') {
+      cy.nodes().removeClass('dimmed');
+      cy.edges().removeClass('dimmed');
+    }
+
+    // In cluster view, hide all entities when pressing Escape
+    if (currentView === 'cluster') {
+      cy.nodes('[type="entity"]').style('display', 'none');
+      cy.edges('[type="references"]').style('display', 'none');
+    }
+
+    return;
+  }
+
   // Delete/Backspace - close selected tab(s) or cluster
   if (event.key === 'Delete' || event.key === 'Backspace') {
     // Prevent default browser back navigation on Backspace
@@ -1006,6 +1037,128 @@ async function closeTabsById(tabIds) {
       });
     }
   });
+}
+
+// ============================================================================
+// Two-Way Sync: Handle Chrome Group State Changes
+// ============================================================================
+
+/**
+ * Handle Chrome tab group collapse/expand state changes.
+ * Updates visualization cluster state to match Chrome.
+ *
+ * Strategy: Only collapse cluster in viz if ALL its Chrome groups are collapsed.
+ * This handles multi-window clusters properly.
+ *
+ * @param {number} chromeGroupId - The Chrome tab group ID that changed
+ * @param {boolean} isCollapsed - Whether the Chrome group is now collapsed
+ */
+function handleChromeGroupStateChange(chromeGroupId, isCollapsed) {
+  if (!cy) return;
+
+  console.log(`[SYNC] Chrome group ${chromeGroupId} ${isCollapsed ? 'collapsed' : 'expanded'}`);
+
+  // Debug: Check what group_id values exist in the graph
+  const allTabs = cy.nodes('[type="tab"]');
+  console.log(`[SYNC DEBUG] Total tabs in graph: ${allTabs.length}`);
+
+  const groupIdSample = allTabs.slice(0, 3).map(tab => ({
+    tabId: tab.data('id'),
+    groupId: tab.data('group_id'),
+    groupIdType: typeof tab.data('group_id')
+  }));
+  console.log(`[SYNC DEBUG] Sample tab group_ids:`, groupIdSample);
+
+  // Find all tabs with this group_id
+  const affectedTabs = cy.nodes('[type="tab"]').filter(tab => {
+    return tab.data('group_id') === chromeGroupId;
+  });
+
+  console.log(`[SYNC] Found ${affectedTabs.length} tabs with group_id ${chromeGroupId}`);
+
+  // If no tabs found in viz data, query Chrome directly
+  if (affectedTabs.length === 0) {
+    console.log(`[SYNC] No tabs found with group_id in viz data, querying Chrome API...`);
+
+    // Query Chrome to find which tabs are in this group
+    chrome.tabs.query({}, (chromeTabs) => {
+      const matchingTabIds = chromeTabs
+        .filter(tab => tab.groupId === chromeGroupId)
+        .map(tab => tab.id);
+
+      console.log(`[SYNC] Chrome reports ${matchingTabIds.length} tabs in group ${chromeGroupId}:`, matchingTabIds);
+
+      // Find these tabs in the viz by their ID
+      const affectedTabsFromChrome = cy.nodes('[type="tab"]').filter(tab => {
+        const tabId = parseInt(tab.data('id').replace('tab_', ''));
+        return matchingTabIds.includes(tabId);
+      });
+
+      console.log(`[SYNC] Found ${affectedTabsFromChrome.length} matching tabs in viz`);
+
+      if (affectedTabsFromChrome.length === 0) {
+        console.log(`[SYNC] No matching tabs found - group may not be in viz`);
+        return;
+      }
+
+      // Continue with the sync using tabs found from Chrome
+      syncClusterWithTabs(affectedTabsFromChrome, isCollapsed);
+    });
+    return;
+  }
+
+  // Continue with the sync using tabs from viz data
+  syncClusterWithTabs(affectedTabs, isCollapsed);
+}
+
+/**
+ * Helper function to sync cluster collapse state based on affected tabs.
+ * Extracted to avoid code duplication between viz-data and Chrome-API paths.
+ */
+function syncClusterWithTabs(affectedTabs, isCollapsed) {
+  if (!cy || affectedTabs.length === 0) return;
+
+  // Get cluster from first affected tab
+  const firstTab = affectedTabs[0];
+  const clusterId = firstTab.data('cluster_id');
+  const clusterNode = cy.$(`#${clusterId}`);
+
+  if (clusterNode.length === 0) {
+    console.log(`[SYNC] Cluster ${clusterId} not found`);
+    return;
+  }
+
+  console.log(`[SYNC] Syncing cluster ${clusterId} - isCollapsed=${isCollapsed}`);
+
+  // Update visualization cluster state based on Chrome group state
+  if (isCollapsed) {
+    // Collapse: Hide the affected tabs and mark cluster as collapsed
+    console.log(`[SYNC] Collapsing cluster ${clusterId} in viz`);
+    clusterNode.addClass('collapsed');
+
+    // Hide the affected tabs in this Chrome group
+    affectedTabs.forEach(tab => {
+      tab.addClass('hidden');
+      cy.edges(`[target="${tab.id()}"]`).addClass('hidden');
+
+      // Hide entities connected to these tabs
+      cy.edges(`[source="${tab.id()}"][type="references"]`).forEach(entityEdge => {
+        const entityNode = cy.getElementById(entityEdge.data('target'));
+        entityNode.style('display', 'none');
+        entityEdge.style('display', 'none');
+      });
+    });
+  } else {
+    // Expand: Show the affected tabs and mark cluster as expanded
+    console.log(`[SYNC] Expanding cluster ${clusterId} in viz`);
+    clusterNode.removeClass('collapsed');
+
+    // Show the affected tabs
+    affectedTabs.forEach(tab => {
+      tab.removeClass('hidden');
+      cy.edges(`[target="${tab.id()}"]`).removeClass('hidden');
+    });
+  }
 }
 
 // ============================================================================
