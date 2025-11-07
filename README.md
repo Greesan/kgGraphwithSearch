@@ -1,6 +1,6 @@
 HOLY IT ACTUALLY KINDA WORKS!
 
-<img width="1874" height="1013" alt="image" src="https://github.com/user-attachments/assets/6831e293-b731-4a8a-bdb8-88a5cc711cd6" />
+<img width="1691" height="1057" alt="image" src="https://github.com/user-attachments/assets/fd71bf39-4a14-4d6e-a1a0-438298008174" />
 
 
 # TabGraph
