@@ -1,5 +1,3 @@
-HOLY IT ACTUALLY KINDA WORKS!
-
 <img width="1691" height="1057" alt="image" src="https://github.com/user-attachments/assets/fd71bf39-4a14-4d6e-a1a0-438298008174" />
 
 
